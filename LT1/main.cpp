@@ -69,7 +69,7 @@ int main(int argc, char** argv) {
     }
 
     if (fonts.empty()) {
-        std::cerr << "Не удалось загрузить ни один шрифт из assets/\n";
+        std::cerr << "Cand load fonts from assets/\n";
         return 1;
     }
 
