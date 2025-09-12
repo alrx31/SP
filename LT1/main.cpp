@@ -26,20 +26,16 @@ struct ColorParse {
 
 int main(int argc, char** argv) {
     if (argc < 3) {
-        std::cerr << "Usage: " << argv[0] << " <m rows> <n cols> [frame size] [bgcolor hex] [linecolor hex] [line size] [font index]\n";
+        std::cerr << "Usage: " << argv[0] << " <m rows> <n cols> [frame size] [bgcolor hex] [linecolor hex] [line size] [font index] [border hex] [text hex] [font size]\n";
         return 1;
     }
     
-    int m = std::stoi(argv[1]);                                           //m
-    int n = std::stoi(argv[2]);                                           //n        
-    int frameSize = (argc >= 4) ? std::stoi(argv[3]) : 10.0f;             //frame size (border size)
+    int m = std::stoi(argv[1]);                                           // m
+    int n = std::stoi(argv[2]);                                           // n        
+    int frameSize = (argc >= 4) ? std::stoi(argv[3]) : 10.0f;             // frame size (border size)
     
-    sf::Color borderColor = sf::Color::Red;
-    sf::Color textColor = sf::Color::Red;
-    
-    ColorParse::hexToColor("#0000FF", borderColor);
-    ColorParse::hexToColor("#FF0000", textColor);
-    
+    sf::Color borderColor = sf::Color::Red;                               // border color
+    sf::Color textColor = sf::Color::Red;                                 // text color
     sf::Color bgColor = sf::Color::Black;                                 // bg color
     sf::Color lineColor = sf::Color::White;                               // line color
     
@@ -47,8 +43,12 @@ int main(int argc, char** argv) {
     if (argc >= 6) ColorParse::hexToColor(argv[5], lineColor);
     
     float lineSize = argc >= 7 ? std::stof(argv[6]) : 10.f;               // line size
-    int fontSize = 1.5f;                                                  // font size multiplier
     size_t currentFontIndex = argc >= 8 ? std::stoi(argv[7]) : 1;         // font index
+    
+    if (argc >= 9) ColorParse::hexToColor(argv[8], borderColor);
+    if (argc >= 10) ColorParse::hexToColor(argv[9], textColor);
+    
+    int fontSize = argc >= 11 ? std::stof(argv[10]) : 1.5f ;               // font size multiplier
 
     auto desktop = sf::VideoMode::getDesktopMode();
     unsigned int width = desktop.size.x;
@@ -74,10 +74,9 @@ int main(int argc, char** argv) {
     }
 
     sf::Font* activeFont = &fonts[currentFontIndex];
-
     sf::Font font;
-    
     fs::path defaultFont = fs::path("assets") / "Sansation-Regular.ttf";
+
     bool fontLoaded = font.openFromFile(defaultFont.string());
 
     if (!fontLoaded) {
@@ -94,11 +93,11 @@ int main(int argc, char** argv) {
             std::ostringstream oss;
             oss << "col" << j + 1;
 
-            sf::Text t(*fontPtr, oss.str(), 40);
+            unsigned int size = 40;
+            sf::Text t(*fontPtr, oss.str(), size);
             t.setFillColor(textColor);
 
             auto bounds = t.getLocalBounds();
-            unsigned int size = 40;
             t.setCharacterSize(size * fontSize);
 
             bounds = t.getLocalBounds();
@@ -125,11 +124,6 @@ int main(int argc, char** argv) {
             if (event.is<sf::Event::Closed>()) {
                 window.close();
             }
-            if (event.is<sf::Event::KeyPressed>()) {
-                if (event.getIf<sf::Event::KeyPressed>()->code == sf::Keyboard::Key::Escape) {
-                    window.close();
-                }
-            }
         }
 
         window.clear(bgColor);
@@ -153,8 +147,6 @@ int main(int argc, char** argv) {
         rightBorder.setPosition(sf::Vector2f(width - frameSize, (float)frameSize));
         rightBorder.setFillColor(borderColor);
         window.draw(rightBorder);
-
-        float pxLost = 0.0f;
 
         for (int i = 1; i < m; i++) {
             sf::RectangleShape line({(float)width - frameSize * 2, (float)lineSize});
