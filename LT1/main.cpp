@@ -26,13 +26,13 @@ struct ColorParse {
 
 int main(int argc, char** argv) {
     if (argc < 3) {
-        std::cerr << "Usage: " << argv[0] << " <m rows> <n cols> [frame size] [bgcolor hex] [linecolor hex] [line size]\n";
+        std::cerr << "Usage: " << argv[0] << " <m rows> <n cols> [frame size] [bgcolor hex] [linecolor hex] [line size] [font index]\n";
         return 1;
     }
     
-    int m = std::stoi(argv[1]);
-    int n = std::stoi(argv[2]);
-    int frameSize = (argc >= 4) ? std::stoi(argv[3]) : 10.0f;
+    int m = std::stoi(argv[1]);                                           //m
+    int n = std::stoi(argv[2]);                                           //n        
+    int frameSize = (argc >= 4) ? std::stoi(argv[3]) : 10.0f;             //frame size (border size)
     
     sf::Color borderColor = sf::Color::Red;
     sf::Color textColor = sf::Color::Red;
@@ -40,14 +40,15 @@ int main(int argc, char** argv) {
     ColorParse::hexToColor("#0000FF", borderColor);
     ColorParse::hexToColor("#FF0000", textColor);
     
-    sf::Color bgColor = sf::Color::Black;
-    sf::Color lineColor = sf::Color::White;
+    sf::Color bgColor = sf::Color::Black;                                 // bg color
+    sf::Color lineColor = sf::Color::White;                               // line color
     
     if (argc >= 5) ColorParse::hexToColor(argv[4], bgColor);
     if (argc >= 6) ColorParse::hexToColor(argv[5], lineColor);
     
-    float lineSize = argc >= 7 ? std::stof(argv[6]) : 10.f;
-    int fontSize = 2.0f;
+    float lineSize = argc >= 7 ? std::stof(argv[6]) : 10.f;               // line size
+    int fontSize = 1.5f;                                                  // font size multiplier
+    size_t currentFontIndex = argc >= 8 ? std::stoi(argv[7]) : 1;         // font index
 
     auto desktop = sf::VideoMode::getDesktopMode();
     unsigned int width = desktop.size.x;
@@ -72,10 +73,7 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    size_t currentFontIndex = 2;
     sf::Font* activeFont = &fonts[currentFontIndex];
-    std::cout << "Загружено " << fonts.size() << " шрифтов. Текущий: " 
-              << fontNames[currentFontIndex] << "\n";
 
     sf::Font font;
     
