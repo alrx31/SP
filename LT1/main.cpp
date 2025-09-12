@@ -45,7 +45,7 @@ int main(int argc, char** argv) {
 
     auto desktop = sf::VideoMode::getDesktopMode();
     unsigned int width = desktop.size.x;
-    unsigned int height = desktop.size.y - 40;
+    unsigned int height = desktop.size.y - 37;
 
     sf::RenderWindow window(desktop, "", sf::State::Fullscreen);
 
