@@ -32,7 +32,7 @@ int main(int argc, char** argv) {
     
     int m = std::stoi(argv[1]);
     int n = std::stoi(argv[2]);
-    int frameSize = (argc >= 4) ? std::stoi(argv[3]) : 10;
+    int frameSize = (argc >= 4) ? std::stoi(argv[3]) : 10.0f;
     
     sf::Color borderColor = sf::Color::Red;
     sf::Color textColor = sf::Color::Red;
@@ -46,7 +46,7 @@ int main(int argc, char** argv) {
     if (argc >= 5) ColorParse::hexToColor(argv[4], bgColor);
     if (argc >= 6) ColorParse::hexToColor(argv[5], lineColor);
     
-    float lineSize = argc >= 7 ? std::stof(argv[6]) : 1.f;
+    float lineSize = argc >= 7 ? std::stof(argv[6]) : 10.f;
     int fontSize = 2.0f;
 
     auto desktop = sf::VideoMode::getDesktopMode();
@@ -54,6 +54,28 @@ int main(int argc, char** argv) {
     unsigned int height = desktop.size.y - 37;
 
     sf::RenderWindow window(desktop, "", sf::State::Fullscreen);
+
+    std::vector<sf::Font> fonts;
+    std::vector<std::string> fontNames;
+    for (const auto& entry : fs::directory_iterator("assets")) {
+        if (entry.path().extension() == ".ttf") {
+            sf::Font f;
+            if (f.openFromFile(entry.path().string())) {
+                fonts.push_back(std::move(f));
+                fontNames.push_back(entry.path().filename().string());
+            }
+        }
+    }
+
+    if (fonts.empty()) {
+        std::cerr << "Не удалось загрузить ни один шрифт из assets/\n";
+        return 1;
+    }
+
+    size_t currentFontIndex = 2;
+    sf::Font* activeFont = &fonts[currentFontIndex];
+    std::cout << "Загружено " << fonts.size() << " шрифтов. Текущий: " 
+              << fontNames[currentFontIndex] << "\n";
 
     sf::Font font;
     
@@ -65,39 +87,38 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    float cellWidth = (width - frameSize * 2 - lineSize) / static_cast<float>(n);
-    float cellHeight = (height - frameSize * 2 - lineSize) / static_cast<float>(m);
+    float cellWidth = (width - frameSize * 2) / static_cast<float>(n);
+    float cellHeight = (height - frameSize * 2) / static_cast<float>(m);
 
-    std::vector<sf::Text> headers;
-    for (int j = 0; j < n; j++) {
-        std::ostringstream oss;
-        oss << "col" << j + 1;
+    auto buildHeaders = [&](sf::Font* fontPtr) {
+        std::vector<sf::Text> result;
+        for (int j = 0; j < n; j++) {
+            std::ostringstream oss;
+            oss << "col" << j + 1;
 
-        sf::Text t(font, oss.str(), 40);
-        t.setFillColor(lineColor);
+            sf::Text t(*fontPtr, oss.str(), 40);
+            t.setFillColor(textColor);
 
-        auto bounds = t.getLocalBounds();
-        float targetW = cellWidth * 0.8f;
-        unsigned int size = 40;
+            auto bounds = t.getLocalBounds();
+            unsigned int size = 40;
+            t.setCharacterSize(size * fontSize);
 
-        //while (size > 6 && bounds.size.x > targetW) {
-        //    size -= 2;  
-        //}
+            bounds = t.getLocalBounds();
 
-        t.setCharacterSize(size*fontSize);
-        bounds = t.getLocalBounds();
+            float cx = frameSize + j * cellWidth + cellWidth / 2.f;
+            float cy = frameSize + cellHeight / 2.f;
 
-        float cx = frameSize + j * cellWidth + cellWidth / 2.f;
-        float cy = frameSize + cellHeight / 2.f;
-
-        
-        t.setOrigin(sf::Vector2f(bounds.position.x + bounds.size.x / 2.f,
+            t.setOrigin(sf::Vector2f(bounds.position.x + bounds.size.x / 2.f,
                                  bounds.position.y + bounds.size.y / 2.f));
-        t.setPosition(sf::Vector2f(cx, cy));
+            t.setPosition(sf::Vector2f(cx, cy));
 
-        headers.push_back(t);
-    }
+            result.push_back(t);
+        }
+        return result;
+    };
 
+    std::vector<sf::Text> headers = buildHeaders(activeFont);
+    
     while (window.isOpen()) {
         while (auto eventOpt = window.pollEvent()) {
             if (!eventOpt) break;
@@ -134,6 +155,8 @@ int main(int argc, char** argv) {
         rightBorder.setPosition(sf::Vector2f(width - frameSize, (float)frameSize));
         rightBorder.setFillColor(borderColor);
         window.draw(rightBorder);
+
+        float pxLost = 0.0f;
 
         for (int i = 1; i < m; i++) {
             sf::RectangleShape line({(float)width - frameSize * 2, (float)lineSize});
