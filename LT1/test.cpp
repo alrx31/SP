@@ -36,52 +36,24 @@ struct FileInfo {
 // Функция для получения прав доступа к файлу
 std::string getFilePermissions(const fs::path& path) {
     try {
-        auto status = fs::status(path);
         auto perms = fs::status(path).permissions();
         std::string result;
-
-        if (fs::is_directory(status)) {
-            result += 'd';
-        } else if (fs::is_symlink(status)) {
-            result += 'l';
-        } else if (fs::is_regular_file(status)) {
-            result += '-';
-        } else if (fs::is_block_file(status)) {
-            result += 'b';
-        } else if (fs::is_character_file(status)) {
-            result += 'c';
-        } else if (fs::is_fifo(status)) {
-            result += 'p';
-        } else if (fs::is_socket(status)) {
-            result += 's';
-        } else {
-            result += '?';
-        }
-
+        
         // Владелец
-        result += (perms & fs::perms::owner_read) != fs::perms::none? "r" : "-";
-        result += (perms & fs::perms::owner_write) != fs::perms::none? "w" : "-";
-        result += (perms & fs::perms::owner_exec) != fs::perms::none? "x" : "-";
-
+        result += (perms & fs::perms::owner_read) != fs::perms::none ? "r" : "-";
+        result += (perms & fs::perms::owner_write) != fs::perms::none ? "w" : "-";
+        result += (perms & fs::perms::owner_exec) != fs::perms::none ? "x" : "-";
+        
         // Группа
-        result += (perms & fs::perms::group_read) != fs::perms::none? "r" : "-";
-        result += (perms & fs::perms::group_write) != fs::perms::none? "w" : "-";
-        result += (perms & fs::perms::group_exec) != fs::perms::none? "x" : "-";
-
-        // Остальные — с учётом sticky bit
-        bool has_others_exec = (perms & fs::perms::others_exec) != fs::perms::none;
-        bool has_sticky_bit = (perms & fs::perms::sticky_bit) != fs::perms::none;
-
-        result += (perms & fs::perms::others_read) != fs::perms::none? "r" : "-";
-        result += (perms & fs::perms::others_write) != fs::perms::none? "w" : "-";
-
-        // Заменяем последний символ (others_exec) на t/T, если есть sticky bit
-        if (has_sticky_bit) {
-            result += has_others_exec ? "t" : "T";
-        } else {
-            result += has_others_exec ? "x" : "-";
-        }
-
+        result += (perms & fs::perms::group_read) != fs::perms::none ? "r" : "-";
+        result += (perms & fs::perms::group_write) != fs::perms::none ? "w" : "-";
+        result += (perms & fs::perms::group_exec) != fs::perms::none ? "x" : "-";
+        
+        // Остальные
+        result += (perms & fs::perms::others_read) != fs::perms::none ? "r" : "-";
+        result += (perms & fs::perms::others_write) != fs::perms::none ? "w" : "-";
+        result += (perms & fs::perms::others_exec) != fs::perms::none ? "x" : "-";
+        
         return result;
     } catch (...) {
         return "----------";
@@ -141,7 +113,7 @@ public:
                     }
                     
                     info.permissions = getFilePermissions(entry.path());
-
+                    
                     files.push_back(info);
                 }
                 
@@ -166,7 +138,6 @@ public:
         return files.size();
     }
 };
-
 // >>> Helper: Truncate string with ellipsis
 std::string truncate(const std::string& str, size_t maxLen = 35) {
     if (str.length() <= maxLen) return str;
@@ -176,7 +147,7 @@ std::string truncate(const std::string& str, size_t maxLen = 35) {
 enum class HAlign { Left, Center, Right };
 enum class VAlign { Top, Center, Bottom };
 
-void setTextPosition(sf::Text& text, const sf::FloatRect& bounds, HAlign hAlign = HAlign::Center, VAlign vAlign = VAlign::Center, float hPadding = 10.0f, float vPadding = 10.0f) {
+void setTextPosition(sf::Text& text, const sf::FloatRect& bounds, HAlign hAlign = HAlign::Center, VAlign vAlign = VAlign::Center, float hPadding = 0.0f, float vPadding = 0.0f) {
     auto localBounds = text.getLocalBounds();
 
     float x = 0.0f;
@@ -218,14 +189,12 @@ int main(int argc, char** argv) {
     }
     
     std::string targetDirectory = argv[1];
-    fs::path absPath = fs::absolute(targetDirectory);
-    std::string absoluteDirectory = absPath.string();
     int m = (argc >= 3) ? std::stoi(argv[2]) : 20;                        // m (rows)
     int n = (argc >= 4) ? std::stoi(argv[3]) : 4;                                            // n        
-    float frameSize = (argc >= 5) ? std::stoi(argv[4]) : 5.0f;             // frame size (border size)
+    float frameSize = (argc >= 5) ? std::stoi(argv[4]) : 10.0f;             // frame size (border size)
     
     sf::Color borderColor = sf::Color::Red;                               // border color
-    sf::Color textColor = sf::Color::Magenta;                                 // text color
+    sf::Color textColor = sf::Color::Red;                                 // text color
     sf::Color bgColor = sf::Color::Black;                                 // bg color
     sf::Color lineColor = sf::Color::White;                               // line color
     sf::Color dirColor = sf::Color::Cyan;                               // line color
@@ -236,12 +205,11 @@ int main(int argc, char** argv) {
     
     float lineSize = argc >= 8 ? std::stof(argv[7]) : 2.f;               // line size
     size_t currentFontIndex = argc >= 9 ? std::stoi(argv[8]) : 1;         // font index
-    size_t currentFontHeaderIndex = argc >= 10 ? std::stoi(argv[9]) : 2;         // font index
     
-    if (argc >= 11) ColorParse::hexToColor(argv[10], borderColor);
-    if (argc >= 12) ColorParse::hexToColor(argv[11], textColor);
+    if (argc >= 10) ColorParse::hexToColor(argv[9], borderColor);
+    if (argc >= 11) ColorParse::hexToColor(argv[10], textColor);
     
-    float fontSize = argc >= 13 ? std::stof(argv[12]) : 1.5f ;               // font size multiplier
+    float fontSize = argc >= 12 ? std::stof(argv[11]) : 1.5f ;               // font size multiplier
     unsigned int charSize = static_cast<unsigned int>(16 * fontSize);      // Base size 16
 
     auto desktop = sf::VideoMode::getDesktopMode();
@@ -266,19 +234,12 @@ int main(int argc, char** argv) {
     }
 
     sf::Font font;
-    sf::Font Headerfont;
-
     if (!fonts.empty() && currentFontIndex < fonts.size()) {
         font = fonts[currentFontIndex];
-        Headerfont = fonts[currentFontHeaderIndex];
     } else {
         // Попытка загрузить системный шрифт
         fs::path defaultFont = fs::path("assets") / "Sansation-Regular.ttf";
         if (!font.openFromFile(defaultFont.string())) {
-            std::cerr << "Warning: Could not load font\n";
-            return 1;
-        }
-        if (!Headerfont.openFromFile(defaultFont.string())) {
             std::cerr << "Warning: Could not load font\n";
             return 1;
         }
@@ -292,25 +253,6 @@ int main(int argc, char** argv) {
 
     float cellWidth = (width - frameSize * 2) / static_cast<float>(n);
     float cellHeight = (height - frameSize * 2) / static_cast<float>(m);
-    
-    //2048
-    
-    float cellNameWidth = 1400.0f;
-    float cellSizeWidth = 216.0f; 
-    float cellDateWidth = 216.0f; 
-    float cellPermWidth = 216.0f; 
-
-    auto calcCellWidthByNumber = [&](int j){
-        switch (j)
-        {
-            case -1: return 0.0f;
-            case 0: return cellNameWidth;
-            case 1: return cellNameWidth + cellSizeWidth;
-            case 2: return cellNameWidth + cellSizeWidth + cellDateWidth;
-            case 3: return cellNameWidth + cellSizeWidth + cellDateWidth + cellPermWidth;
-        }
-        return cellNameWidth + cellSizeWidth + cellDateWidth + cellPermWidth;
-    };
 
     // Загрузка файлов
     FileManager fileManager(targetDirectory);
@@ -324,21 +266,21 @@ int main(int argc, char** argv) {
     std::vector<sf::Text> headers;
 
     {
-        std::vector<std::string> headersNames = {absoluteDirectory, "Size (bytes)", "Date", "Permissions"};
+        std::vector<std::string> headersNames = {"Name", "Size (bytes)", "Date", "Permissions"};
         
         for (int j = 0; j < std::min(n, 4); j++) {
-            sf::Text t(Headerfont, headersNames[j], fontSize);
+            sf::Text t(font, headersNames[j], fontSize);
             t.setFillColor(textColor);
             t.setCharacterSize(charSize + 4);
             
-            float cellWidtht = calcCellWidthByNumber(j-1);
-            float x = j < 4 ? frameSize + cellWidtht : frameSize + cellWidtht + j * cellWidth;
+            //t.setPosition(sf::Vector2f(cx, cy));
+            
             sf::FloatRect cellBounds(
-                sf::Vector2f(x,frameSize),
-                sf::Vector2f(cellWidtht,cellHeight)
+                sf::Vector2f(frameSize + j * cellWidth,frameSize),
+                sf::Vector2f(cellWidth,cellHeight)
             );
 
-            setTextPosition(t,cellBounds,HAlign::Left,VAlign::Center);
+            setTextPosition(t,cellBounds,HAlign::Center,VAlign::Center);
 
             headers.push_back(t);
         }
@@ -369,10 +311,8 @@ int main(int argc, char** argv) {
         for (int i = 0; i < m - 1; i++) {
             for (int j = 0; j < n; j++) {
                 int idx = i * n + j;
-                if (idx >= (int)cells.size()) {
-                    continue; // or break, or handle gracefully
-                }
-                int fileIndex = startIndex + i;
+                int fileIndex = startIndex + idx;
+
                 if (fileIndex >= (int)files.size()) {
                     cells[idx].setString(""); // hide unused
                     continue;
@@ -393,15 +333,15 @@ int main(int argc, char** argv) {
                 t.setFillColor(fileInfo.isDirectory ? dirColor : textColor);
                 
                 //t.setOrigin(sf::Vector2f(bounds.position.x + bounds.size.x / 2.f,
-                
-                float cellWidtht = calcCellWidthByNumber(j-1);
-                float x = j < 4 ? frameSize + cellWidtht : frameSize + cellWidtht + j * cellWidth;
+
                 sf::FloatRect cellBounds(
-                    sf::Vector2f(x,frameSize + (i + 1) * cellHeight),
-                    sf::Vector2f(cellWidtht,cellHeight)
+                    sf::Vector2f(frameSize + j * cellWidth,frameSize + (i + 1) * cellHeight),
+                    sf::Vector2f(cellWidth,cellHeight)
                 );
 
-                setTextPosition(t,cellBounds,HAlign::Left,VAlign::Center);
+                setTextPosition(t,cellBounds,HAlign::Center,VAlign::Center);
+
+                cells.push_back(t);
             }
         }
     };
@@ -524,12 +464,10 @@ int main(int argc, char** argv) {
             window.draw(line);
         }
 
-        for (int j = 1; j <= n; j++) {
+        for (int j = 1; j < n; j++) {
             sf::RectangleShape vline({(float)lineSize, (float)height - frameSize * 2});
             vline.setFillColor(lineColor);
-            float cellWidtht = calcCellWidthByNumber(j-1);
-            float cellCalcWidth = calcCellWidthByNumber(j-1);
-            float x = j <= 4 ? frameSize + cellCalcWidth : frameSize + cellCalcWidth + j * cellWidth;
+            float x = frameSize + j * cellWidth;
             vline.setPosition(sf::Vector2f(x, frameSize));
             window.draw(vline);
         }
