@@ -11,6 +11,15 @@
 #include <chrono>
 #include <functional>
 #include <queue>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <unistd.h>
+#include <dirent.h>
+#include <fcntl.h>
+#include <cstring>
+#include <cerrno>
+#include <pwd.h>
+#include <grp.h>
 
 namespace fs = std::filesystem;
 
@@ -135,114 +144,173 @@ struct FileInfo {
     bool isDirectory;
 };
 
-// Функция для получения размера директории
-std::uintmax_t getDirectorySize(const fs::path& path, FileAccessLogger* logger = nullptr) {
-    std::uintmax_t size = 0;
-    std::error_code ec;
+// Helper function to recursively calculate directory size using stat
+std::uintmax_t calculateDirectorySizeRecursive(const std::string& path, FileAccessLogger* logger = nullptr) {
+    std::uintmax_t totalSize = 0;
+    DIR* dir = opendir(path.c_str());
     
-    for (const auto& entry : fs::recursive_directory_iterator(path, fs::directory_options::skip_permission_denied, ec)) {
-        if (ec) {
-            if (logger) {
-                logger->logSystemError(path.string(), "directory_iteration", ec);
-            }
-            continue; // Skip if we can't access
+    if (!dir) {
+        if (logger) {
+            logger->logUnreadableFile(path, "opendir", std::string("Failed to open directory: ") + strerror(errno));
+        }
+        return 0;
+    }
+    
+    struct dirent* entry;
+    while ((entry = readdir(dir)) != nullptr) {
+        // Skip . and ..
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
+            continue;
         }
         
-        if (entry.is_regular_file(ec) && !ec) {
-            auto fileSize = entry.file_size(ec);
-            if (!ec) {
-                size += fileSize;
-            } else {
-                if (logger) {
-                    logger->logSystemError(entry.path().string(), "file_size", ec);
-                }
-            }
-        } else if (ec) {
+        std::string fullPath = path + "/" + entry->d_name;
+        struct stat statBuf;
+        
+        if (stat(fullPath.c_str(), &statBuf) == -1) {
             if (logger) {
-                logger->logSystemError(entry.path().string(), "file_type_check", ec);
+                logger->logUnreadableFile(fullPath, "stat", std::string("stat failed: ") + strerror(errno));
             }
+            continue;
+        }
+        
+        if (S_ISREG(statBuf.st_mode)) {
+            // Regular file
+            totalSize += statBuf.st_size;
+        } else if (S_ISDIR(statBuf.st_mode)) {
+            // Directory - recurse
+            totalSize += calculateDirectorySizeRecursive(fullPath, logger);
         }
     }
+    
+    closedir(dir);
+    return totalSize;
+}
+
+// Функция для получения размера директории
+std::uintmax_t getDirectorySize(const fs::path& path, FileAccessLogger* logger = nullptr) {
+    std::uintmax_t size = calculateDirectorySizeRecursive(path.string(), logger);
+    
+    // Ensure directory size is a multiple of 4
+    //if (size % 4 != 0) {
+    //    size = ((size / 4) + 1) * 4;
+    //}
+    
     return size;
 }
 
 // Функция для получения прав доступа к файлу
 std::string getFilePermissions(const fs::path& path, FileAccessLogger* logger = nullptr) {
-    try {
-        auto status = fs::status(path);
-        auto perms = fs::status(path).permissions();
-        std::string result;
-
-        if (fs::is_directory(status)) {
-            result += 'd';
-        } else if (fs::is_symlink(status)) {
-            result += 'l';
-        } else if (fs::is_regular_file(status)) {
-            result += '-';
-        } else if (fs::is_block_file(status)) {
-            result += 'b';
-        } else if (fs::is_character_file(status)) {
-            result += 'c';
-        } else if (fs::is_fifo(status)) {
-            result += 'p';
-        } else if (fs::is_socket(status)) {
-            result += 's';
-        } else {
-            result += '?';
-        }
-
-        // Владелец
-        result += (perms & fs::perms::owner_read) != fs::perms::none? "r" : "-";
-        result += (perms & fs::perms::owner_write) != fs::perms::none? "w" : "-";
-        result += (perms & fs::perms::owner_exec) != fs::perms::none? "x" : "-";
-
-        // Группа
-        result += (perms & fs::perms::group_read) != fs::perms::none? "r" : "-";
-        result += (perms & fs::perms::group_write) != fs::perms::none? "w" : "-";
-        result += (perms & fs::perms::group_exec) != fs::perms::none? "x" : "-";
-
-        // Остальные — с учётом sticky bit
-        bool has_others_exec = (perms & fs::perms::others_exec) != fs::perms::none;
-        bool has_sticky_bit = (perms & fs::perms::sticky_bit) != fs::perms::none;
-
-        result += (perms & fs::perms::others_read) != fs::perms::none? "r" : "-";
-        result += (perms & fs::perms::others_write) != fs::perms::none? "w" : "-";
-
-        // Заменяем последний символ (others_exec) на t/T, если есть sticky bit
-        if (has_sticky_bit) {
-            result += has_others_exec ? "t" : "T";
-        } else {
-            result += has_others_exec ? "x" : "-";
-        }
-
-        return result;
-    } catch (const std::filesystem::filesystem_error& e) {
+    struct stat statBuf;
+    
+    if (stat(path.c_str(), &statBuf) == -1) {
         if (logger) {
-            logger->logUnreadableFile(path.string(), "permissions_check", e.what());
-        }
-        return "----------";
-    } catch (const std::exception& e) {
-        if (logger) {
-            logger->logUnreadableFile(path.string(), "permissions_check", e.what());
+            logger->logUnreadableFile(path.string(), "permissions_check", std::string("stat failed: ") + strerror(errno));
         }
         return "----------";
     }
+    
+    std::string result;
+    
+    // File type
+    if (S_ISDIR(statBuf.st_mode)) {
+        result += 'd';
+    } else if (S_ISLNK(statBuf.st_mode)) {
+        result += 'l';
+    } else if (S_ISREG(statBuf.st_mode)) {
+        result += '-';
+    } else if (S_ISBLK(statBuf.st_mode)) {
+        result += 'b';
+    } else if (S_ISCHR(statBuf.st_mode)) {
+        result += 'c';
+    } else if (S_ISFIFO(statBuf.st_mode)) {
+        result += 'p';
+    } else if (S_ISSOCK(statBuf.st_mode)) {
+        result += 's';
+    } else {
+        result += '?';
+    }
+    
+    // Owner permissions
+    result += (statBuf.st_mode & S_IRUSR) ? "r" : "-";
+    result += (statBuf.st_mode & S_IWUSR) ? "w" : "-";
+    result += (statBuf.st_mode & S_IXUSR) ? "x" : "-";
+    
+    // Group permissions
+    result += (statBuf.st_mode & S_IRGRP) ? "r" : "-";
+    result += (statBuf.st_mode & S_IWGRP) ? "w" : "-";
+    result += (statBuf.st_mode & S_IXGRP) ? "x" : "-";
+    
+    // Others permissions with sticky bit consideration
+    bool has_others_exec = (statBuf.st_mode & S_IXOTH) != 0;
+    bool has_sticky_bit = (statBuf.st_mode & S_ISVTX) != 0;
+    
+    result += (statBuf.st_mode & S_IROTH) ? "r" : "-";
+    result += (statBuf.st_mode & S_IWOTH) ? "w" : "-";
+    
+    // Replace last character (others_exec) with t/T if sticky bit is set
+    if (has_sticky_bit) {
+        result += has_others_exec ? "t" : "T";
+    } else {
+        result += has_others_exec ? "x" : "-";
+    }
+    
+    return result;
 }
 
-// Функция для форматирования даты
+// Функция для форматирования даты в стиле ls -l
+std::string formatDate(time_t mtime, FileAccessLogger* logger = nullptr, const std::string& filePath = "") {
+    try {
+        std::tm* tm = std::localtime(&mtime);
+        if (!tm) {
+            if (logger && !filePath.empty()) {
+                logger->logUnreadableFile(filePath, "date_format", "Failed to convert time_t to tm");
+            }
+            return "Jan  1  1970";
+        }
+        
+        // Get current time to determine if we should show year or time
+        time_t now = time(nullptr);
+        std::tm* now_tm = std::localtime(&now);
+        
+        std::ostringstream oss;
+        
+        // Month names like ls -l
+        const char* months[] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                               "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
+        
+        oss << months[tm->tm_mon] << " ";
+        
+        // Day with appropriate spacing (ls -l style)
+        if (tm->tm_mday < 10) {
+            oss << " " << tm->tm_mday << " ";
+        } else {
+            oss << tm->tm_mday << " ";
+        }
+        
+        // If file is from this year, show time; otherwise show year
+        if (now_tm && tm->tm_year == now_tm->tm_year) {
+            oss << std::setfill('0') << std::setw(2) << tm->tm_hour << ":"
+                << std::setfill('0') << std::setw(2) << tm->tm_min;
+        } else {
+            oss << " " << (tm->tm_year + 1900);
+        }
+        
+        return oss.str();
+    } catch (const std::exception& e) {
+        if (logger && !filePath.empty()) {
+            logger->logUnreadableFile(filePath, "date_format", e.what());
+        }
+        return "Jan  1  1970";
+    }
+}
+
+// Overload for filesystem compatibility (if needed)
 std::string formatDate(const fs::file_time_type& ftime, FileAccessLogger* logger = nullptr, const std::string& filePath = "") {
     try {
         auto sctp = std::chrono::time_point_cast<std::chrono::system_clock::duration>(
             ftime - fs::file_time_type::clock::now() + std::chrono::system_clock::now());
         std::time_t cftime = std::chrono::system_clock::to_time_t(sctp);
-        std::tm* tm = std::localtime(&cftime);
-        
-        std::ostringstream oss;
-        oss << std::setfill('0') << std::setw(2) << tm->tm_mday << "."
-            << std::setfill('0') << std::setw(2) << (tm->tm_mon + 1) << "."
-            << (tm->tm_year + 1900);
-        
-        return oss.str();
+        return formatDate(cftime, logger, filePath);
     } catch (const std::exception& e) {
         if (logger && !filePath.empty()) {
             logger->logUnreadableFile(filePath, "date_format", e.what());
@@ -269,161 +337,134 @@ public:
         loadFiles();
     }
     
+    void loadFilesRecursive(const std::string& path, std::queue<std::string>& dirsToProcess) {
+        DIR* dir = opendir(path.c_str());
+        
+        if (!dir) {
+            if (logger) {
+                logger->logUnreadableFile(path, "opendir", std::string("Failed to open directory: ") + strerror(errno));
+            }
+            return;
+        }
+        
+        struct dirent* entry;
+        while ((entry = readdir(dir)) != nullptr) {
+            // Skip . and ..
+            if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
+                continue;
+            }
+            
+            std::string fullPath = path + "/" + entry->d_name;
+            struct stat statBuf;
+            
+            if (stat(fullPath.c_str(), &statBuf) == -1) {
+                if (logger) {
+                    logger->logUnreadableFile(fullPath, "stat", std::string("stat failed: ") + strerror(errno));
+                }
+                continue;
+            }
+            
+            FileInfo info;
+            info.name = fullPath;
+            info.isDirectory = S_ISDIR(statBuf.st_mode);
+            
+            // Get file size
+            if (info.isDirectory) {
+                // For directories, use the directory entry size (like ls -l), not recursive content size
+                info.size = std::to_string(statBuf.st_size);
+                
+                // Add directory to queue for recursive processing if accessible
+                DIR* testDir = opendir(fullPath.c_str());
+                if (testDir) {
+                    closedir(testDir);
+                    dirsToProcess.push(fullPath);
+                } else if (logger) {
+                    logger->logUnreadableFile(fullPath, "subdirectory_access_test", std::string("opendir failed: ") + strerror(errno));
+                }
+            } else {
+                // Regular file or other file type
+                info.size = std::to_string(statBuf.st_size);
+            }
+            
+            // Get file modification time
+            info.date = formatDate(statBuf.st_mtime, logger.get(), fullPath);
+            
+            // Get file permissions
+            info.permissions = getFilePermissions(fullPath, logger.get());
+                        
+            // Get user and group information
+            std::string user = "unknown";
+            std::string group = "unknown";
+            
+            struct passwd* pw = getpwuid(statBuf.st_uid);
+            if (pw) {
+                user = pw->pw_name;
+            } else {
+                user = std::to_string(statBuf.st_uid);
+            }
+            
+            struct group* gr = getgrgid(statBuf.st_gid);
+            if (gr) {
+                group = gr->gr_name;
+            } else {
+                group = std::to_string(statBuf.st_gid);
+            }
+            
+            files.push_back(info);
+        }
+        
+        closedir(dir);
+    }
+    
     void loadFiles() {
         files.clear();
-        std::error_code ec;
+        
+        // Check if directory exists and is accessible
+        struct stat statBuf;
+        if (stat(directoryPath.c_str(), &statBuf) == -1) {
+            if (logger) {
+                logger->logUnreadableFile(directoryPath, "directory_exists_check", std::string("stat failed: ") + strerror(errno));
+            }
+            return;
+        }
+        
+        if (!S_ISDIR(statBuf.st_mode)) {
+            if (logger) {
+                logger->logUnreadableFile(directoryPath, "directory_type_check", "Not a directory");
+            }
+            return;
+        }
+        
+        // Test basic directory access
+        DIR* testDir = opendir(directoryPath.c_str());
+        if (!testDir) {
+            if (logger) {
+                logger->logUnreadableFile(directoryPath, "directory_access_test", std::string("opendir failed: ") + strerror(errno));
+            }
+            std::cerr << "Cannot access directory: " << directoryPath << " - " << strerror(errno) << std::endl;
+            return;
+        }
+        closedir(testDir);
         
         try {
-            if (!fs::exists(directoryPath, ec) || ec) {
-                if (logger) {
-                    if (ec) {
-                        logger->logSystemError(directoryPath, "directory_exists_check", ec);
-                    } else {
-                        logger->logFileNotFound(directoryPath, "directory_access");
-                    }
-                }
-                return;
-            }
+            // Use queue-based approach to handle recursion and catch all permission errors
+            std::queue<std::string> dirsToProcess;
+            dirsToProcess.push(directoryPath);
             
-            if (!fs::is_directory(directoryPath, ec) || ec) {
-                if (logger && ec) {
-                    logger->logSystemError(directoryPath, "directory_type_check", ec);
-                }
-                return;
-            }
-            
-            // Try to create directory iterator - this will catch permission denied errors
-            try {
-                // First, try to access the directory with a simple directory_iterator (non-recursive)
-                // to catch permission denied errors early
-                fs::directory_iterator testIter(directoryPath, ec);
-                if (ec) {
+            while (!dirsToProcess.empty()) {
+                std::string currentDir = dirsToProcess.front();
+                dirsToProcess.pop();
+                
+                try {
+                    loadFilesRecursive(currentDir, dirsToProcess);
+                } catch (const std::exception& e) {
                     if (logger) {
-                        logger->logSystemError(directoryPath, "directory_access_test", ec);
-                    }
-                    std::cerr << "Cannot access directory: " << directoryPath << " - " << ec.message() << std::endl;
-                    return;
-                }
-                
-                // If basic access works, proceed with recursive iteration
-                // Use a queue-based approach to manually handle recursion and catch all permission errors
-                std::queue<fs::path> dirsToProcess;
-                dirsToProcess.push(directoryPath);
-                
-                while (!dirsToProcess.empty()) {
-                    fs::path currentDir = dirsToProcess.front();
-                    dirsToProcess.pop();
-                    
-                    std::error_code ec;
-                    
-                    try {
-                        for (const auto& entry : fs::directory_iterator(currentDir, ec)) {
-                            if (ec) {
-                                if (logger) {
-                                    logger->logSystemError(currentDir.string(), "directory_iteration", ec);
-                                }
-                                break; // Stop processing this directory
-                            }
-                            
-                            FileInfo info;
-                            info.name = entry.path().string();
-                            info.isDirectory = entry.is_directory(ec);
-                            
-                            if (ec) {
-                                if (logger) {
-                                    logger->logSystemError(entry.path().string(), "directory_type_check", ec);
-                                }
-                                info.isDirectory = false;
-                                ec.clear();
-                            }
-                            
-                            // Get file size
-                            if (info.isDirectory) {
-                                try {
-                                    auto dirSize = getDirectorySize(entry.path(), logger.get());
-                                    info.size = std::to_string(dirSize);
-                                } catch (const std::exception& e) {
-                                    if (logger) {
-                                        logger->logUnreadableFile(entry.path().string(), "directory_size_calculation", e.what());
-                                    }
-                                    info.size = "0";
-                                }
-                                
-                                // Try to add directory to queue for recursive processing
-                                // But first test if we can actually access it
-                                std::error_code testEc;
-                                try {
-                                    fs::directory_iterator testIter(entry.path(), testEc);
-                                    if (testEc) {
-                                        if (logger) {
-                                            logger->logSystemError(entry.path().string(), "subdirectory_access_test", testEc);
-                                        }
-                                    } else {
-                                        dirsToProcess.push(entry.path());
-                                    }
-                                } catch (const std::filesystem::filesystem_error& fsErr) {
-                                    if (logger) {
-                                        logger->logUnreadableFile(entry.path().string(), "subdirectory_access", fsErr.what());
-                                    }
-                                } catch (const std::exception& e) {
-                                    if (logger) {
-                                        logger->logUnreadableFile(entry.path().string(), "subdirectory_test", e.what());
-                                    }
-                                }
-                            } else {
-                                auto fileSize = entry.file_size(ec);
-                                if (ec) {
-                                    if (logger) {
-                                        logger->logSystemError(entry.path().string(), "file_size", ec);
-                                    }
-                                    info.size = "0";
-                                    ec.clear();
-                                } else {
-                                    info.size = std::to_string(fileSize);
-                                }
-                            }
-                            
-                            // Get file modification time
-                            auto ftime = entry.last_write_time(ec);
-                            if (ec) {
-                                if (logger) {
-                                    logger->logSystemError(entry.path().string(), "last_write_time", ec);
-                                }
-                                info.date = "01.01.1970";
-                                ec.clear();
-                            } else {
-                                info.date = formatDate(ftime, logger.get(), entry.path().string());
-                            }
-                            
-                            // Get file permissions
-                            info.permissions = getFilePermissions(entry.path(), logger.get());
-                            
-                            files.push_back(info);
-                        }
-                    } catch (const std::filesystem::filesystem_error& fsErr) {
-                        if (logger) {
-                            logger->logUnreadableFile(currentDir.string(), "directory_access", fsErr.what());
-                        }
-                    } catch (const std::exception& e) {
-                        if (logger) {
-                            logger->logUnreadableFile(currentDir.string(), "directory_processing", e.what());
-                        }
+                        logger->logUnreadableFile(currentDir, "directory_processing", e.what());
                     }
                 }
-            } catch (const std::filesystem::filesystem_error& fsErr) {
-                // This catches permission denied and other filesystem errors when creating the iterator
-                if (logger) {
-                    logger->logUnreadableFile(directoryPath, "directory_access", fsErr.what());
-                }
-                std::cerr << "Cannot access directory: " << fsErr.what() << std::endl;
-                return;
-            } catch (const std::exception& e) {
-                if (logger) {
-                    logger->logUnreadableFile(directoryPath, "directory_iterator_creation", e.what());
-                }
-                std::cerr << "Error creating directory iterator: " << e.what() << std::endl;
-                return;
-            }            // Сортировка: сначала каталоги, потом файлы
+            }
+            
+            // Сортировка: сначала каталоги, потом файлы
             std::sort(files.begin(), files.end(), [](const FileInfo& a, const FileInfo& b) {
                 if (a.isDirectory != b.isDirectory) {
                     return a.isDirectory > b.isDirectory;
@@ -431,11 +472,6 @@ public:
                 return a.name < b.name;
             });
             
-        } catch (const std::filesystem::filesystem_error& e) {
-            if (logger) {
-                logger->logUnreadableFile(directoryPath, "filesystem_operation", e.what());
-            }
-            std::cerr << "Filesystem error reading directory: " << e.what() << std::endl;
         } catch (const std::exception& e) {
             if (logger) {
                 logger->logUnreadableFile(directoryPath, "general_error", e.what());
@@ -473,7 +509,7 @@ enum class VAlign { Top, Center, Bottom };
 // Configuration structure for runtime menu
 struct AppConfig {
     int m = 20;                           // rows
-    int n = 4;                            // columns
+    int n = 4;                            // columns (for ls -l format)
     float frameSize = 5.0f;               // frame size (border size)
     float lineSize = 2.0f;                // line size
     size_t currentFontIndex = 1;          // font index
@@ -741,7 +777,7 @@ int main(int argc, char** argv) {
     }
     
     std::string targetDirectory = argv[1];
-    fs::path absPath = fs::absolute(targetDirectory);
+    fs::path absPath = fs::canonical(targetDirectory);
     std::string absoluteDirectory = absPath.string();
     
     // Initialize configuration with command line arguments or defaults
@@ -859,7 +895,7 @@ int main(int argc, char** argv) {
     };
 
     // Загрузка файлов
-    FileManager fileManager(targetDirectory);
+    FileManager fileManager(absoluteDirectory);
     const auto& files = fileManager.getFiles();
     
     // Inform user about logging
