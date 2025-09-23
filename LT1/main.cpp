@@ -7,8 +7,109 @@
 #include <cstdint>
 #include <algorithm>
 #include <iomanip>
+#include <fstream>
+#include <chrono>
+#include <functional>
+#include <queue>
 
 namespace fs = std::filesystem;
+
+// Logger class for tracking files that cannot be read
+class FileAccessLogger {
+private:
+    std::string logFilePath;
+    std::ofstream logFile;
+    bool loggingEnabled;
+
+public:
+    FileAccessLogger() 
+        : logFilePath("unreadable_files.log"), loggingEnabled(true) {
+        try {
+            logFile.open(logFilePath, std::ios::app);
+            if (logFile.is_open()) {
+                // Write session header
+                auto now = std::chrono::system_clock::now();
+                auto time_t = std::chrono::system_clock::to_time_t(now);
+                logFile << "\n=== Session started: " << std::put_time(std::localtime(&time_t), "%Y-%m-%d %H:%M:%S") 
+                        << " ===" << std::endl;
+                logFile.flush();
+            } else {
+                std::cout << "[LOG] Warning: Could not open log file: " << logFilePath << " - using console output" << std::endl;
+            }
+        } catch (const std::exception& e) {
+            std::cout << "[LOG] Warning: Failed to initialize file logger: " << e.what() << " - using console output" << std::endl;
+        }
+        
+        // Always log session start, either to file or console
+        if (!logFile.is_open()) {
+            auto now = std::chrono::system_clock::now();
+            auto time_t = std::chrono::system_clock::to_time_t(now);
+            std::cout << "[LOG] === Session started: " << std::put_time(std::localtime(&time_t), "%Y-%m-%d %H:%M:%S") 
+                      << " ===" << std::endl;
+        }
+    }
+
+    ~FileAccessLogger() {
+        auto now = std::chrono::system_clock::now();
+        auto time_t = std::chrono::system_clock::to_time_t(now);
+        
+        if (logFile.is_open()) {
+            logFile << "=== Session ended: " << std::put_time(std::localtime(&time_t), "%Y-%m-%d %H:%M:%S") 
+                    << " ===\n" << std::endl;
+            logFile.close();
+        } else {
+            std::cout << "[LOG] === Session ended: " << std::put_time(std::localtime(&time_t), "%Y-%m-%d %H:%M:%S") 
+                      << " ===" << std::endl;
+        }
+    }
+
+    void logUnreadableFile(const std::string& filePath, const std::string& operation, const std::string& errorMsg) {
+        auto now = std::chrono::system_clock::now();
+        auto time_t = std::chrono::system_clock::to_time_t(now);
+        
+        std::ostringstream logMessage;
+        logMessage << "[" << std::put_time(std::localtime(&time_t), "%H:%M:%S") << "] "
+                   << "FAILED " << operation << ": " << filePath;
+        
+        if (!errorMsg.empty()) {
+            logMessage << " - Error: " << errorMsg;
+        }
+        
+        // Try to write to log file if available
+        if (loggingEnabled && logFile.is_open()) {
+            try {
+                logFile << logMessage.str() << std::endl;
+                logFile.flush();
+            } catch (const std::exception& e) {
+                // If file logging fails, output to console
+                std::cout << "[LOG] " << logMessage.str() << std::endl;
+            }
+        } else {
+            // If no log file available, output to console
+            std::cout << "[LOG] " << logMessage.str() << std::endl;
+        }
+    }
+
+    void logAccessDenied(const std::string& filePath, const std::string& operation = "access") {
+        logUnreadableFile(filePath, operation, "Permission denied");
+    }
+
+    void logFileNotFound(const std::string& filePath, const std::string& operation = "access") {
+        logUnreadableFile(filePath, operation, "File not found");
+    }
+
+    void logSystemError(const std::string& filePath, const std::string& operation, const std::error_code& ec) {
+        logUnreadableFile(filePath, operation, ec.message());
+    }
+
+    std::string getLogFilePath() const {
+        return logFilePath;
+    }
+
+    bool isLoggingEnabled() const {
+        return loggingEnabled;
+    }
+};
 
 struct ColorParse {
     static bool hexToColor(const std::string& hex, sf::Color& out) {
@@ -35,17 +136,30 @@ struct FileInfo {
 };
 
 // Функция для получения размера директории
-std::uintmax_t getDirectorySize(const fs::path& path) {
+std::uintmax_t getDirectorySize(const fs::path& path, FileAccessLogger* logger = nullptr) {
     std::uintmax_t size = 0;
     std::error_code ec;
     
     for (const auto& entry : fs::recursive_directory_iterator(path, fs::directory_options::skip_permission_denied, ec)) {
-        if (ec) continue; // Skip if we can't access
+        if (ec) {
+            if (logger) {
+                logger->logSystemError(path.string(), "directory_iteration", ec);
+            }
+            continue; // Skip if we can't access
+        }
         
         if (entry.is_regular_file(ec) && !ec) {
             auto fileSize = entry.file_size(ec);
             if (!ec) {
                 size += fileSize;
+            } else {
+                if (logger) {
+                    logger->logSystemError(entry.path().string(), "file_size", ec);
+                }
+            }
+        } else if (ec) {
+            if (logger) {
+                logger->logSystemError(entry.path().string(), "file_type_check", ec);
             }
         }
     }
@@ -53,7 +167,7 @@ std::uintmax_t getDirectorySize(const fs::path& path) {
 }
 
 // Функция для получения прав доступа к файлу
-std::string getFilePermissions(const fs::path& path) {
+std::string getFilePermissions(const fs::path& path, FileAccessLogger* logger = nullptr) {
     try {
         auto status = fs::status(path);
         auto perms = fs::status(path).permissions();
@@ -102,83 +216,230 @@ std::string getFilePermissions(const fs::path& path) {
         }
 
         return result;
-    } catch (...) {
+    } catch (const std::filesystem::filesystem_error& e) {
+        if (logger) {
+            logger->logUnreadableFile(path.string(), "permissions_check", e.what());
+        }
+        return "----------";
+    } catch (const std::exception& e) {
+        if (logger) {
+            logger->logUnreadableFile(path.string(), "permissions_check", e.what());
+        }
         return "----------";
     }
 }
 
 // Функция для форматирования даты
-std::string formatDate(const fs::file_time_type& ftime) {
-    auto sctp = std::chrono::time_point_cast<std::chrono::system_clock::duration>(
-        ftime - fs::file_time_type::clock::now() + std::chrono::system_clock::now());
-    std::time_t cftime = std::chrono::system_clock::to_time_t(sctp);
-    std::tm* tm = std::localtime(&cftime);
-    
-    std::ostringstream oss;
-    oss << std::setfill('0') << std::setw(2) << tm->tm_mday << "."
-        << std::setfill('0') << std::setw(2) << (tm->tm_mon + 1) << "."
-        << (tm->tm_year + 1900);
-    
-    return oss.str();
+std::string formatDate(const fs::file_time_type& ftime, FileAccessLogger* logger = nullptr, const std::string& filePath = "") {
+    try {
+        auto sctp = std::chrono::time_point_cast<std::chrono::system_clock::duration>(
+            ftime - fs::file_time_type::clock::now() + std::chrono::system_clock::now());
+        std::time_t cftime = std::chrono::system_clock::to_time_t(sctp);
+        std::tm* tm = std::localtime(&cftime);
+        
+        std::ostringstream oss;
+        oss << std::setfill('0') << std::setw(2) << tm->tm_mday << "."
+            << std::setfill('0') << std::setw(2) << (tm->tm_mon + 1) << "."
+            << (tm->tm_year + 1900);
+        
+        return oss.str();
+    } catch (const std::exception& e) {
+        if (logger && !filePath.empty()) {
+            logger->logUnreadableFile(filePath, "date_format", e.what());
+        }
+        return "01.01.1970";
+    }
 }
 
 class FileManager {
 private:
     std::vector<FileInfo> files;
     std::string directoryPath;
+    std::unique_ptr<FileAccessLogger> logger;
     
 public:
     FileManager(const std::string& path) : directoryPath(path) {
+        // Initialize logger
+        try {
+            logger = std::make_unique<FileAccessLogger>();
+        } catch (const std::exception& e) {
+            std::cerr << "Warning: Could not initialize file access logger: " << e.what() << std::endl;
+            logger = nullptr;
+        }
         loadFiles();
     }
     
     void loadFiles() {
         files.clear();
+        std::error_code ec;
+        
         try {
-            if (fs::exists(directoryPath) && fs::is_directory(directoryPath)) {
-                for (const auto& entry : fs::recursive_directory_iterator(directoryPath)) {
-                    FileInfo info;
-                    info.name = entry.path().string();
-                    info.isDirectory = entry.is_directory();
-                    
-                    if (info.isDirectory) {
-                        try {
-                            // Calculate actual directory size
-                            auto dirSize = getDirectorySize(entry.path());
-                            info.size = std::to_string(dirSize);
-                        } catch (...) {
-                            info.size = "0";
-                        }
+            if (!fs::exists(directoryPath, ec) || ec) {
+                if (logger) {
+                    if (ec) {
+                        logger->logSystemError(directoryPath, "directory_exists_check", ec);
                     } else {
-                        try {
-                            auto fileSize = fs::file_size(entry.path());
-                            info.size = std::to_string(fileSize);
-                        } catch (...) {
-                            info.size = "0";
-                        }
+                        logger->logFileNotFound(directoryPath, "directory_access");
                     }
-                    
-                    try {
-                        auto ftime = fs::last_write_time(entry.path());
-                        info.date = formatDate(ftime);
-                    } catch (...) {
-                        info.date = "01.01.1970";
+                }
+                return;
+            }
+            
+            if (!fs::is_directory(directoryPath, ec) || ec) {
+                if (logger && ec) {
+                    logger->logSystemError(directoryPath, "directory_type_check", ec);
+                }
+                return;
+            }
+            
+            // Try to create directory iterator - this will catch permission denied errors
+            try {
+                // First, try to access the directory with a simple directory_iterator (non-recursive)
+                // to catch permission denied errors early
+                fs::directory_iterator testIter(directoryPath, ec);
+                if (ec) {
+                    if (logger) {
+                        logger->logSystemError(directoryPath, "directory_access_test", ec);
                     }
-                    
-                    info.permissions = getFilePermissions(entry.path());
-
-                    files.push_back(info);
+                    std::cerr << "Cannot access directory: " << directoryPath << " - " << ec.message() << std::endl;
+                    return;
                 }
                 
-                // Сортировка: сначала каталоги, потом файлы
-                std::sort(files.begin(), files.end(), [](const FileInfo& a, const FileInfo& b) {
-                    if (a.isDirectory != b.isDirectory) {
-                        return a.isDirectory > b.isDirectory;
+                // If basic access works, proceed with recursive iteration
+                // Use a queue-based approach to manually handle recursion and catch all permission errors
+                std::queue<fs::path> dirsToProcess;
+                dirsToProcess.push(directoryPath);
+                
+                while (!dirsToProcess.empty()) {
+                    fs::path currentDir = dirsToProcess.front();
+                    dirsToProcess.pop();
+                    
+                    std::error_code ec;
+                    
+                    try {
+                        for (const auto& entry : fs::directory_iterator(currentDir, ec)) {
+                            if (ec) {
+                                if (logger) {
+                                    logger->logSystemError(currentDir.string(), "directory_iteration", ec);
+                                }
+                                break; // Stop processing this directory
+                            }
+                            
+                            FileInfo info;
+                            info.name = entry.path().string();
+                            info.isDirectory = entry.is_directory(ec);
+                            
+                            if (ec) {
+                                if (logger) {
+                                    logger->logSystemError(entry.path().string(), "directory_type_check", ec);
+                                }
+                                info.isDirectory = false;
+                                ec.clear();
+                            }
+                            
+                            // Get file size
+                            if (info.isDirectory) {
+                                try {
+                                    auto dirSize = getDirectorySize(entry.path(), logger.get());
+                                    info.size = std::to_string(dirSize);
+                                } catch (const std::exception& e) {
+                                    if (logger) {
+                                        logger->logUnreadableFile(entry.path().string(), "directory_size_calculation", e.what());
+                                    }
+                                    info.size = "0";
+                                }
+                                
+                                // Try to add directory to queue for recursive processing
+                                // But first test if we can actually access it
+                                std::error_code testEc;
+                                try {
+                                    fs::directory_iterator testIter(entry.path(), testEc);
+                                    if (testEc) {
+                                        if (logger) {
+                                            logger->logSystemError(entry.path().string(), "subdirectory_access_test", testEc);
+                                        }
+                                    } else {
+                                        dirsToProcess.push(entry.path());
+                                    }
+                                } catch (const std::filesystem::filesystem_error& fsErr) {
+                                    if (logger) {
+                                        logger->logUnreadableFile(entry.path().string(), "subdirectory_access", fsErr.what());
+                                    }
+                                } catch (const std::exception& e) {
+                                    if (logger) {
+                                        logger->logUnreadableFile(entry.path().string(), "subdirectory_test", e.what());
+                                    }
+                                }
+                            } else {
+                                auto fileSize = entry.file_size(ec);
+                                if (ec) {
+                                    if (logger) {
+                                        logger->logSystemError(entry.path().string(), "file_size", ec);
+                                    }
+                                    info.size = "0";
+                                    ec.clear();
+                                } else {
+                                    info.size = std::to_string(fileSize);
+                                }
+                            }
+                            
+                            // Get file modification time
+                            auto ftime = entry.last_write_time(ec);
+                            if (ec) {
+                                if (logger) {
+                                    logger->logSystemError(entry.path().string(), "last_write_time", ec);
+                                }
+                                info.date = "01.01.1970";
+                                ec.clear();
+                            } else {
+                                info.date = formatDate(ftime, logger.get(), entry.path().string());
+                            }
+                            
+                            // Get file permissions
+                            info.permissions = getFilePermissions(entry.path(), logger.get());
+                            
+                            files.push_back(info);
+                        }
+                    } catch (const std::filesystem::filesystem_error& fsErr) {
+                        if (logger) {
+                            logger->logUnreadableFile(currentDir.string(), "directory_access", fsErr.what());
+                        }
+                    } catch (const std::exception& e) {
+                        if (logger) {
+                            logger->logUnreadableFile(currentDir.string(), "directory_processing", e.what());
+                        }
                     }
-                    return a.name < b.name;
-                });
+                }
+            } catch (const std::filesystem::filesystem_error& fsErr) {
+                // This catches permission denied and other filesystem errors when creating the iterator
+                if (logger) {
+                    logger->logUnreadableFile(directoryPath, "directory_access", fsErr.what());
+                }
+                std::cerr << "Cannot access directory: " << fsErr.what() << std::endl;
+                return;
+            } catch (const std::exception& e) {
+                if (logger) {
+                    logger->logUnreadableFile(directoryPath, "directory_iterator_creation", e.what());
+                }
+                std::cerr << "Error creating directory iterator: " << e.what() << std::endl;
+                return;
+            }            // Сортировка: сначала каталоги, потом файлы
+            std::sort(files.begin(), files.end(), [](const FileInfo& a, const FileInfo& b) {
+                if (a.isDirectory != b.isDirectory) {
+                    return a.isDirectory > b.isDirectory;
+                }
+                return a.name < b.name;
+            });
+            
+        } catch (const std::filesystem::filesystem_error& e) {
+            if (logger) {
+                logger->logUnreadableFile(directoryPath, "filesystem_operation", e.what());
             }
+            std::cerr << "Filesystem error reading directory: " << e.what() << std::endl;
         } catch (const std::exception& e) {
+            if (logger) {
+                logger->logUnreadableFile(directoryPath, "general_error", e.what());
+            }
             std::cerr << "Error reading directory: " << e.what() << std::endl;
         }
     }
@@ -189,6 +450,14 @@ public:
     
     size_t getFileCount() const {
         return files.size();
+    }
+    
+    std::string getLogFilePath() const {
+        return logger ? logger->getLogFilePath() : "";
+    }
+    
+    bool isLoggingEnabled() const {
+        return logger ? logger->isLoggingEnabled() : false;
     }
 };
 
@@ -593,6 +862,11 @@ int main(int argc, char** argv) {
     FileManager fileManager(targetDirectory);
     const auto& files = fileManager.getFiles();
     
+    // Inform user about logging
+    if (fileManager.isLoggingEnabled()) {
+        std::cout << "Logging unreadable files to: " << fileManager.getLogFilePath() << std::endl;
+    }
+    
     // Пагинация
     int currentPage = 0;
     auto calculatePagination = [&]() {
@@ -695,6 +969,11 @@ int main(int argc, char** argv) {
         std::ostringstream oss;
         oss << "Page " << (currentPage + 1) << "/" << totalPages
             << " | Files: " << files.size();
+        
+        // Add logging information if available
+        if (fileManager.isLoggingEnabled()) {
+            oss << " | Log: " << fs::path(fileManager.getLogFilePath()).filename().string();
+        }
             //<< " | Dir: " << truncate(targetDirectory, 50);
         
         unsigned int charSize = static_cast<unsigned int>(16 * config.fontSize);
@@ -784,6 +1063,14 @@ int main(int argc, char** argv) {
                         fileManager.loadFiles();
                         currentPage = 0;
                         refreshAll();
+                    }
+                    // Show log info
+                    else if (keyPressed->scancode == sf::Keyboard::Scancode::L) {
+                        if (fileManager.isLoggingEnabled()) {
+                            std::cout << "Log file location: " << fileManager.getLogFilePath() << std::endl;
+                            std::cout << "Use 'tail -f " << fileManager.getLogFilePath() << "' to monitor in real-time" << std::endl;
+                            std::cout << "Note: If log file is not accessible, messages are displayed in console" << std::endl;
+                        }
                     }
                 }   
             }
