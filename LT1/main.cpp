@@ -34,6 +34,24 @@ struct FileInfo {
     bool isDirectory;
 };
 
+// Функция для получения размера директории
+std::uintmax_t getDirectorySize(const fs::path& path) {
+    std::uintmax_t size = 0;
+    std::error_code ec;
+    
+    for (const auto& entry : fs::recursive_directory_iterator(path, fs::directory_options::skip_permission_denied, ec)) {
+        if (ec) continue; // Skip if we can't access
+        
+        if (entry.is_regular_file(ec) && !ec) {
+            auto fileSize = entry.file_size(ec);
+            if (!ec) {
+                size += fileSize;
+            }
+        }
+    }
+    return size;
+}
+
 // Функция для получения прав доступа к файлу
 std::string getFilePermissions(const fs::path& path) {
     try {
@@ -124,7 +142,13 @@ public:
                     info.isDirectory = entry.is_directory();
                     
                     if (info.isDirectory) {
-                        info.size = "<DIR>";
+                        try {
+                            // Calculate actual directory size
+                            auto dirSize = getDirectorySize(entry.path());
+                            info.size = std::to_string(dirSize);
+                        } catch (...) {
+                            info.size = "0";
+                        }
                     } else {
                         try {
                             auto fileSize = fs::file_size(entry.path());
@@ -366,12 +390,6 @@ public:
             item.setPosition(sf::Vector2f(menuX + 10, menuY + 40 + i * 30));
             window.draw(item);
         }
-        
-        // Instructions
-        sf::Text instructions(menuFont, "Use Arrow Keys to navigate, Enter to select, ESC to close", 12);
-        instructions.setFillColor(sf::Color(200, 200, 200));
-        instructions.setPosition(sf::Vector2f(menuX + 10, menuY + menuHeight - 25));
-        window.draw(instructions);
     }
     
 private:
@@ -676,8 +694,8 @@ int main(int argc, char** argv) {
     auto updatePageInfo = [&]() {
         std::ostringstream oss;
         oss << "Page " << (currentPage + 1) << "/" << totalPages
-            << " | Files: " << files.size()
-            << " | Dir: " << truncate(targetDirectory, 50);
+            << " | Files: " << files.size();
+            //<< " | Dir: " << truncate(targetDirectory, 50);
         
         unsigned int charSize = static_cast<unsigned int>(16 * config.fontSize);
         sf::Text t(font, oss.str(), charSize - 2);
