@@ -20,6 +20,7 @@
 #include <cerrno>
 #include <pwd.h>
 #include <grp.h>
+#include <sys/statvfs.h>
 
 namespace fs = std::filesystem;
 
@@ -142,7 +143,33 @@ struct FileInfo {
     std::string date;
     std::string permissions;
     bool isDirectory;
+    std::uintmax_t actualSize;    // размер данных
+    std::uintmax_t allocatedSize; // фактически занимаемое место
 };
+
+// Helper function to get filesystem block size
+std::uintmax_t getFilesystemBlockSize(const std::string& path) {
+    struct statvfs vfs;
+    if (statvfs(path.c_str(), &vfs) == 0) {
+        return vfs.f_bsize;
+    }
+    return 4096; // default block size if statvfs fails
+}
+
+// Helper function to calculate allocated size (rounded up to block size)
+std::uintmax_t calculateAllocatedSize(std::uintmax_t actualSize, std::uintmax_t blockSize) {
+    if (actualSize == 0) return 0;
+    return ((actualSize + blockSize - 1) / blockSize) * blockSize;
+}
+
+// Helper function to format size with both actual and allocated sizes
+std::string formatSizeInfo(std::uintmax_t actualSize, std::uintmax_t allocatedSize) {
+    if (actualSize == allocatedSize || true) {
+        return std::to_string(allocatedSize);
+    } else {
+        return std::to_string(actualSize) + "/" + std::to_string(allocatedSize);
+    }
+}
 
 // Helper function to recursively calculate directory size using stat
 std::uintmax_t calculateDirectorySizeRecursive(const std::string& path, FileAccessLogger* logger = nullptr) {
@@ -347,6 +374,9 @@ public:
             return;
         }
         
+        // Get filesystem block size for this directory
+        std::uintmax_t blockSize = getFilesystemBlockSize(path);
+        
         struct dirent* entry;
         while ((entry = readdir(dir)) != nullptr) {
             // Skip . and ..
@@ -368,10 +398,12 @@ public:
             info.name = fullPath;
             info.isDirectory = S_ISDIR(statBuf.st_mode);
             
-            // Get file size
+            // Get actual and allocated file sizes
+            info.actualSize = statBuf.st_size;
             if (info.isDirectory) {
-                // For directories, use the directory entry size (like ls -l), not recursive content size
-                info.size = std::to_string(statBuf.st_size);
+                // For directories, use the directory entry size
+                info.allocatedSize = calculateAllocatedSize(statBuf.st_size, blockSize);
+                info.size = formatSizeInfo(info.actualSize, info.allocatedSize);
                 
                 // Add directory to queue for recursive processing if accessible
                 DIR* testDir = opendir(fullPath.c_str());
@@ -383,7 +415,8 @@ public:
                 }
             } else {
                 // Regular file or other file type
-                info.size = std::to_string(statBuf.st_size);
+                info.allocatedSize = calculateAllocatedSize(statBuf.st_size, blockSize);
+                info.size = formatSizeInfo(info.actualSize, info.allocatedSize);
             }
             
             // Get file modification time
@@ -877,8 +910,8 @@ int main(int argc, char** argv) {
     
     //2048
     
-    float cellNameWidth = 1400.0f;
-    float cellSizeWidth = 216.0f; 
+    float cellNameWidth = 1250.0f;
+    float cellSizeWidth = 366.0f; 
     float cellDateWidth = 216.0f; 
     float cellPermWidth = 216.0f; 
 
@@ -919,7 +952,7 @@ int main(int argc, char** argv) {
     // Function to update headers
     auto updateHeaders = [&]() {
         headers.clear();
-        std::vector<std::string> headersNames = {absoluteDirectory, "Size (bytes)", "Date", "Permissions"};
+        std::vector<std::string> headersNames = {absoluteDirectory, "Size (data/allocated)", "Date", "Permissions"};
         unsigned int charSize = static_cast<unsigned int>(16 * config.fontSize);
         
         for (int j = 0; j < std::min(config.n, 4); j++) {
