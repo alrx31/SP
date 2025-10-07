@@ -168,7 +168,7 @@ std::string formatSizeInfo(std::uintmax_t actualSize, std::uintmax_t allocatedSi
     // Pre-allocate string to avoid reallocation
     std::string result;
     result.reserve(16);  // Reserve space for typical size strings
-    return std::to_string(actualSize);
+    return std::to_string(allocatedSize);
 }
 
 // REMOVED: Recursive directory size calculation - too slow for large directories
@@ -334,10 +334,11 @@ private:
     std::string directoryPath;
     std::unique_ptr<FileAccessLogger> logger;
     bool scanInterrupted = false;
-    int maxDepth = 10;  // Default depth limit
+    sf::RenderWindow* window = nullptr;  // Reference to window for event handling
     
 public:
-    FileManager(const std::string& path, int depth = 10) : directoryPath(path), maxDepth(depth) {
+    FileManager(const std::string& path, sf::RenderWindow* win = nullptr) 
+        : directoryPath(path), window(win) {
         // Initialize logger
         try {
             logger = std::make_unique<FileAccessLogger>();
@@ -349,19 +350,10 @@ public:
     }
     
     void interruptScan() { scanInterrupted = true; }
-    void setMaxDepth(int depth) { maxDepth = depth; }
     
     void loadFilesRecursive(const std::string& path, std::queue<std::pair<std::string, int>>& dirsToProcess, int currentDepth = 0) {
         // Check for interruption
         if (scanInterrupted) {
-            return;
-        }
-        
-        // Check depth limit
-        if (currentDepth > maxDepth) {
-            if (logger) {
-                logger->logUnreadableFile(path, "max_depth_exceeded", "Maximum scan depth reached");
-            }
             return;
         }
         
@@ -410,11 +402,9 @@ public:
                 info.allocatedSize = calculateAllocatedSize(statBuf.st_size, blockSize);
                 info.size = formatSizeInfo(info.actualSize, info.allocatedSize);
                 
-                // Add directory to queue for recursive processing if accessible and within depth limit
-                if (currentDepth < maxDepth && access(fullPath.c_str(), R_OK | X_OK) == 0) {
+                // Add directory to queue for recursive processing if accessible
+                if (access(fullPath.c_str(), R_OK | X_OK) == 0) {
                     dirsToProcess.push({fullPath, currentDepth + 1});
-                } else if (logger && currentDepth >= maxDepth) {
-                    logger->logUnreadableFile(fullPath, "max_depth_limit", "Directory skipped due to depth limit");
                 } else if (logger) {
                     logger->logUnreadableFile(fullPath, "subdirectory_access_test", std::string("access denied: ") + strerror(errno));
                 }
@@ -486,8 +476,47 @@ public:
                 dirsToProcess.pop();
                 processedDirs++;
                 
-                // Progress feedback every 50 directories for faster updates
-                if (processedDirs % 50 == 0) {
+                // Handle window events every 10 directories to prevent "not responding" dialog
+                if (window && processedDirs % 10 == 0) {
+                    while (auto eventOpt = window->pollEvent()) {
+                        if (!eventOpt) break;
+                        const sf::Event& event = *eventOpt;
+                        
+                        if (event.is<sf::Event::Closed>()) {
+                            scanInterrupted = true;
+                            break;
+                        }
+                        
+                        if (event.is<sf::Event::KeyPressed>()) {
+                            if(const auto* keyPressed = event.getIf<sf::Event::KeyPressed>()){
+                                if (keyPressed->scancode == sf::Keyboard::Scancode::Escape) {
+                                    scanInterrupted = true;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    
+                    // Update window display to show we're still alive
+                    if (window->isOpen()) {
+                        window->clear(sf::Color::Black);
+                        
+                        // Show progress text
+                        sf::Font font;
+                        if (font.openFromFile("assets/Sansation-Regular.ttf")) {
+                            sf::Text progressText(font, "Scanning: " + std::to_string(processedDirs) + 
+                                                " dirs, " + std::to_string(files.size()) + " files\nPress ESC to stop", 24);
+                            progressText.setFillColor(sf::Color::White);
+                            progressText.setPosition(sf::Vector2f(50, 50));
+                            window->draw(progressText);
+                        }
+                        
+                        window->display();
+                    }
+                }
+                
+                // Progress feedback every 100 directories for console output
+                if (processedDirs % 100 == 0) {
                     auto currentTime = std::chrono::steady_clock::now();
                     auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(currentTime - startTime).count();
                     std::cout << "\rProcessed " << processedDirs << " directories, found " << files.size() 
@@ -825,8 +854,8 @@ void setTextPosition(sf::Text& text, const sf::FloatRect& bounds, HAlign hAlign 
 int main(int argc, char** argv) {
     if (argc < 2) {
         std::cerr << "Usage: " << argv[0] << " <dir> [m rows] [n cols] [frame size] [bgcolor hex] [linecolor hex] [line size] [font index] [border hex] [text hex] [font size]\n";
-        std::cerr << "Optimized for fast scanning like 'ls -lR'. System dirs limited to 5 levels depth for performance.\n";
-        std::cerr << "Controls: Arrow keys/PgUp/PgDn = navigate, R = rescan, M = menu, L = show log info\n";
+        std::cerr << "Optimized for fast scanning like 'ls -lR'. Shows ALL files recursively with no depth limits.\n";
+        std::cerr << "Controls: Arrow keys/PgUp/PgDn = navigate, R = rescan, M = menu, L = show log info, ESC = interrupt scan\n";
         return 1;
     }
     
@@ -948,21 +977,15 @@ int main(int argc, char** argv) {
         return cellNameWidth + cellSizeWidth + cellDateWidth + cellPermWidth;
     };
 
-    // Загрузка файлов (with depth limit for performance)
-    int scanDepth = 10;  // Reasonable depth limit for /usr
-    if (absoluteDirectory.find("usr") != std::string::npos || 
-        absoluteDirectory.find("/lib") != std::string::npos ||
-        absoluteDirectory.find("/sys") != std::string::npos) {
-        scanDepth = 5;  // Limit system directories to 5 levels
-        std::cout << "System directory detected, limiting scan depth to " << scanDepth << " levels" << std::endl;
-    }
+    // Загрузка файлов (no depth limits - show all files)
+    std::cout << "Scanning all files recursively (no depth limit)..." << std::endl;
     
-    FileManager fileManager(absoluteDirectory, scanDepth);
-    const auto& files = fileManager.getFiles();
+    std::unique_ptr<FileManager> fileManagerPtr = std::make_unique<FileManager>(absoluteDirectory, &window);
+    auto files = fileManagerPtr->getFiles();
     
     // Inform user about logging
-    if (fileManager.isLoggingEnabled()) {
-        std::cout << "Logging unreadable files to: " << fileManager.getLogFilePath() << std::endl;
+    if (fileManagerPtr->isLoggingEnabled()) {
+        std::cout << "Logging unreadable files to: " << fileManagerPtr->getLogFilePath() << std::endl;
     }
     
     // Пагинация
@@ -1069,8 +1092,8 @@ int main(int argc, char** argv) {
             << " | Files: " << files.size();
         
         // Add logging information if available
-        if (fileManager.isLoggingEnabled()) {
-            oss << " | Log: " << fs::path(fileManager.getLogFilePath()).filename().string();
+        if (fileManagerPtr->isLoggingEnabled()) {
+            oss << " | Log: " << fs::path(fileManagerPtr->getLogFilePath()).filename().string();
         }
             //<< " | Dir: " << truncate(targetDirectory, 50);
         
@@ -1107,6 +1130,17 @@ int main(int argc, char** argv) {
         initializeCells();
         updateCells(currentPage);
         updatePageInfo();
+    };
+    
+    // Function to rescan directory
+    auto rescanDirectory = [&]() {
+        std::cout << "Rescanning directory (no depth limit)..." << std::endl;
+        
+        // Create new FileManager instance
+        fileManagerPtr = std::make_unique<FileManager>(absoluteDirectory, &window);
+        files = fileManagerPtr->getFiles();
+        currentPage = 0;
+        refreshAll();
     };
 
     // Initial setup
@@ -1158,15 +1192,13 @@ int main(int argc, char** argv) {
                     // Reset
                     else if (keyPressed->scancode == sf::Keyboard::Scancode::R) {
                         // Перезагрузка файлов
-                        fileManager.loadFiles();
-                        currentPage = 0;
-                        refreshAll();
+                        rescanDirectory();
                     }
                     // Show log info
                     else if (keyPressed->scancode == sf::Keyboard::Scancode::L) {
-                        if (fileManager.isLoggingEnabled()) {
-                            std::cout << "Log file location: " << fileManager.getLogFilePath() << std::endl;
-                            std::cout << "Use 'tail -f " << fileManager.getLogFilePath() << "' to monitor in real-time" << std::endl;
+                        if (fileManagerPtr->isLoggingEnabled()) {
+                            std::cout << "Log file location: " << fileManagerPtr->getLogFilePath() << std::endl;
+                            std::cout << "Use 'tail -f " << fileManagerPtr->getLogFilePath() << "' to monitor in real-time" << std::endl;
                             std::cout << "Note: If log file is not accessible, messages are displayed in console" << std::endl;
                         }
                     }
