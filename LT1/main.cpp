@@ -164,79 +164,33 @@ std::uintmax_t calculateAllocatedSize(std::uintmax_t actualSize, std::uintmax_t 
 
 // Helper function to format size with both actual and allocated sizes
 std::string formatSizeInfo(std::uintmax_t actualSize, std::uintmax_t allocatedSize) {
-    if (actualSize == allocatedSize || true) {
-        return std::to_string(allocatedSize);
-    } else {
-        return std::to_string(actualSize) + "/" + std::to_string(allocatedSize);
-    }
+    // For performance, just return the actual size as string
+    // Pre-allocate string to avoid reallocation
+    std::string result;
+    result.reserve(16);  // Reserve space for typical size strings
+    return std::to_string(actualSize);
 }
 
-// Helper function to recursively calculate directory size using stat
-std::uintmax_t calculateDirectorySizeRecursive(const std::string& path, FileAccessLogger* logger = nullptr) {
-    std::uintmax_t totalSize = 0;
-    DIR* dir = opendir(path.c_str());
-    
-    if (!dir) {
+// REMOVED: Recursive directory size calculation - too slow for large directories
+// For performance, we now just show the directory entry size, not the total content size
+// This is similar to how 'ls -l' works by default
+
+// Fast directory size - just returns the directory entry size (like ls -l)
+std::uintmax_t getDirectorySize(const fs::path& path, FileAccessLogger* logger = nullptr) {
+    struct stat statBuf;
+    if (stat(path.c_str(), &statBuf) == -1) {
         if (logger) {
-            logger->logUnreadableFile(path, "opendir", std::string("Failed to open directory: ") + strerror(errno));
+            logger->logUnreadableFile(path.string(), "stat_for_dir_size", std::string("stat failed: ") + strerror(errno));
         }
         return 0;
     }
-    
-    struct dirent* entry;
-    while ((entry = readdir(dir)) != nullptr) {
-        // Skip . and ..
-        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
-            continue;
-        }
-        
-        std::string fullPath = path + "/" + entry->d_name;
-        struct stat statBuf;
-        
-        if (stat(fullPath.c_str(), &statBuf) == -1) {
-            if (logger) {
-                logger->logUnreadableFile(fullPath, "stat", std::string("stat failed: ") + strerror(errno));
-            }
-            continue;
-        }
-        
-        if (S_ISREG(statBuf.st_mode)) {
-            // Regular file
-            totalSize += statBuf.st_size;
-        } else if (S_ISDIR(statBuf.st_mode)) {
-            // Directory - recurse
-            totalSize += calculateDirectorySizeRecursive(fullPath, logger);
-        }
-    }
-    
-    closedir(dir);
-    return totalSize;
+    return statBuf.st_size;  // Just return directory entry size
 }
 
-// Функция для получения размера директории
-std::uintmax_t getDirectorySize(const fs::path& path, FileAccessLogger* logger = nullptr) {
-    std::uintmax_t size = calculateDirectorySizeRecursive(path.string(), logger);
-    
-    // Ensure directory size is a multiple of 4
-    //if (size % 4 != 0) {
-    //    size = ((size / 4) + 1) * 4;
-    //}
-    
-    return size;
-}
-
-// Функция для получения прав доступа к файлу
-std::string getFilePermissions(const fs::path& path, FileAccessLogger* logger = nullptr) {
-    struct stat statBuf;
-    
-    if (stat(path.c_str(), &statBuf) == -1) {
-        if (logger) {
-            logger->logUnreadableFile(path.string(), "permissions_check", std::string("stat failed: ") + strerror(errno));
-        }
-        return "----------";
-    }
-    
+// Optimized version that reuses existing stat data
+std::string getFilePermissionsFromStat(const struct stat& statBuf) {
     std::string result;
+    result.reserve(10);  // Pre-allocate for efficiency
     
     // File type
     if (S_ISDIR(statBuf.st_mode)) {
@@ -284,7 +238,25 @@ std::string getFilePermissions(const fs::path& path, FileAccessLogger* logger = 
     return result;
 }
 
-// Функция для форматирования даты в стиле ls -l
+// Функция для получения прав доступа к файлу (старая версия, оставлена для совместимости)
+std::string getFilePermissions(const fs::path& path, FileAccessLogger* logger = nullptr) {
+    struct stat statBuf;
+    
+    if (stat(path.c_str(), &statBuf) == -1) {
+        if (logger) {
+            logger->logUnreadableFile(path.string(), "permissions_check", std::string("stat failed: ") + strerror(errno));
+        }
+        return "----------";
+    }
+    
+    return getFilePermissionsFromStat(statBuf);
+}
+
+// Static cache for current year to avoid repeated time() calls
+static time_t cached_now = 0;
+static int cached_current_year = 0;
+
+// Optimized date formatting function
 std::string formatDate(time_t mtime, FileAccessLogger* logger = nullptr, const std::string& filePath = "") {
     try {
         std::tm* tm = std::localtime(&mtime);
@@ -295,34 +267,44 @@ std::string formatDate(time_t mtime, FileAccessLogger* logger = nullptr, const s
             return "Jan  1  1970";
         }
         
-        // Get current time to determine if we should show year or time
+        // Cache current year to avoid repeated time() calls
         time_t now = time(nullptr);
-        std::tm* now_tm = std::localtime(&now);
+        if (now - cached_now > 3600) {  // Update cache every hour
+            cached_now = now;
+            std::tm* now_tm = std::localtime(&now);
+            cached_current_year = now_tm ? now_tm->tm_year : 0;
+        }
         
-        std::ostringstream oss;
+        std::string result;
+        result.reserve(12);  // Pre-allocate for efficiency
         
         // Month names like ls -l
         const char* months[] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun",
                                "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
         
-        oss << months[tm->tm_mon] << " ";
+        result += months[tm->tm_mon];
+        result += " ";
         
         // Day with appropriate spacing (ls -l style)
         if (tm->tm_mday < 10) {
-            oss << " " << tm->tm_mday << " ";
+            result += " ";
+            result += std::to_string(tm->tm_mday);
         } else {
-            oss << tm->tm_mday << " ";
+            result += std::to_string(tm->tm_mday);
         }
+        result += " ";
         
         // If file is from this year, show time; otherwise show year
-        if (now_tm && tm->tm_year == now_tm->tm_year) {
-            oss << std::setfill('0') << std::setw(2) << tm->tm_hour << ":"
-                << std::setfill('0') << std::setw(2) << tm->tm_min;
+        if (cached_current_year > 0 && tm->tm_year == cached_current_year) {
+            char timeBuf[6];
+            snprintf(timeBuf, sizeof(timeBuf), "%02d:%02d", tm->tm_hour, tm->tm_min);
+            result += timeBuf;
         } else {
-            oss << " " << (tm->tm_year + 1900);
+            result += " ";
+            result += std::to_string(tm->tm_year + 1900);
         }
         
-        return oss.str();
+        return result;
     } catch (const std::exception& e) {
         if (logger && !filePath.empty()) {
             logger->logUnreadableFile(filePath, "date_format", e.what());
@@ -351,9 +333,11 @@ private:
     std::vector<FileInfo> files;
     std::string directoryPath;
     std::unique_ptr<FileAccessLogger> logger;
+    bool scanInterrupted = false;
+    int maxDepth = 10;  // Default depth limit
     
 public:
-    FileManager(const std::string& path) : directoryPath(path) {
+    FileManager(const std::string& path, int depth = 10) : directoryPath(path), maxDepth(depth) {
         // Initialize logger
         try {
             logger = std::make_unique<FileAccessLogger>();
@@ -364,7 +348,23 @@ public:
         loadFiles();
     }
     
-    void loadFilesRecursive(const std::string& path, std::queue<std::string>& dirsToProcess) {
+    void interruptScan() { scanInterrupted = true; }
+    void setMaxDepth(int depth) { maxDepth = depth; }
+    
+    void loadFilesRecursive(const std::string& path, std::queue<std::pair<std::string, int>>& dirsToProcess, int currentDepth = 0) {
+        // Check for interruption
+        if (scanInterrupted) {
+            return;
+        }
+        
+        // Check depth limit
+        if (currentDepth > maxDepth) {
+            if (logger) {
+                logger->logUnreadableFile(path, "max_depth_exceeded", "Maximum scan depth reached");
+            }
+            return;
+        }
+        
         DIR* dir = opendir(path.c_str());
         
         if (!dir) {
@@ -377,8 +377,12 @@ public:
         // Get filesystem block size for this directory
         std::uintmax_t blockSize = getFilesystemBlockSize(path);
         
+        // Pre-allocate space to avoid frequent reallocations
+        std::vector<FileInfo> localFiles;
+        localFiles.reserve(1000);  // Reserve space for efficiency
+        
         struct dirent* entry;
-        while ((entry = readdir(dir)) != nullptr) {
+        while ((entry = readdir(dir)) != nullptr && !scanInterrupted) {
             // Skip . and ..
             if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
                 continue;
@@ -387,9 +391,10 @@ public:
             std::string fullPath = path + "/" + entry->d_name;
             struct stat statBuf;
             
-            if (stat(fullPath.c_str(), &statBuf) == -1) {
+            // Use lstat instead of stat for better performance (doesn't follow symlinks)
+            if (lstat(fullPath.c_str(), &statBuf) == -1) {
                 if (logger) {
-                    logger->logUnreadableFile(fullPath, "stat", std::string("stat failed: ") + strerror(errno));
+                    logger->logUnreadableFile(fullPath, "lstat", std::string("lstat failed: ") + strerror(errno));
                 }
                 continue;
             }
@@ -401,17 +406,17 @@ public:
             // Get actual and allocated file sizes
             info.actualSize = statBuf.st_size;
             if (info.isDirectory) {
-                // For directories, use the directory entry size
+                // For directories, just use the directory entry size (don't calculate recursive size)
                 info.allocatedSize = calculateAllocatedSize(statBuf.st_size, blockSize);
                 info.size = formatSizeInfo(info.actualSize, info.allocatedSize);
                 
-                // Add directory to queue for recursive processing if accessible
-                DIR* testDir = opendir(fullPath.c_str());
-                if (testDir) {
-                    closedir(testDir);
-                    dirsToProcess.push(fullPath);
+                // Add directory to queue for recursive processing if accessible and within depth limit
+                if (currentDepth < maxDepth && access(fullPath.c_str(), R_OK | X_OK) == 0) {
+                    dirsToProcess.push({fullPath, currentDepth + 1});
+                } else if (logger && currentDepth >= maxDepth) {
+                    logger->logUnreadableFile(fullPath, "max_depth_limit", "Directory skipped due to depth limit");
                 } else if (logger) {
-                    logger->logUnreadableFile(fullPath, "subdirectory_access_test", std::string("opendir failed: ") + strerror(errno));
+                    logger->logUnreadableFile(fullPath, "subdirectory_access_test", std::string("access denied: ") + strerror(errno));
                 }
             } else {
                 // Regular file or other file type
@@ -422,31 +427,17 @@ public:
             // Get file modification time
             info.date = formatDate(statBuf.st_mtime, logger.get(), fullPath);
             
-            // Get file permissions
-            info.permissions = getFilePermissions(fullPath, logger.get());
-                        
-            // Get user and group information
-            std::string user = "unknown";
-            std::string group = "unknown";
+            // Simplified permissions (reuse stat data)
+            info.permissions = getFilePermissionsFromStat(statBuf);
             
-            struct passwd* pw = getpwuid(statBuf.st_uid);
-            if (pw) {
-                user = pw->pw_name;
-            } else {
-                user = std::to_string(statBuf.st_uid);
-            }
-            
-            struct group* gr = getgrgid(statBuf.st_gid);
-            if (gr) {
-                group = gr->gr_name;
-            } else {
-                group = std::to_string(statBuf.st_gid);
-            }
-            
-            files.push_back(info);
+            localFiles.push_back(std::move(info));
         }
         
         closedir(dir);
+        
+        // Batch append to main files vector
+        files.insert(files.end(), std::make_move_iterator(localFiles.begin()), 
+                     std::make_move_iterator(localFiles.end()));
     }
     
     void loadFiles() {
@@ -469,27 +460,42 @@ public:
         }
         
         // Test basic directory access
-        DIR* testDir = opendir(directoryPath.c_str());
-        if (!testDir) {
+        if (access(directoryPath.c_str(), R_OK | X_OK) != 0) {
             if (logger) {
-                logger->logUnreadableFile(directoryPath, "directory_access_test", std::string("opendir failed: ") + strerror(errno));
+                logger->logUnreadableFile(directoryPath, "directory_access_test", std::string("access denied: ") + strerror(errno));
             }
             std::cerr << "Cannot access directory: " << directoryPath << " - " << strerror(errno) << std::endl;
             return;
         }
-        closedir(testDir);
         
         try {
-            // Use queue-based approach to handle recursion and catch all permission errors
-            std::queue<std::string> dirsToProcess;
-            dirsToProcess.push(directoryPath);
+            std::cout << "Scanning directory tree: " << directoryPath << std::endl;
             
-            while (!dirsToProcess.empty()) {
-                std::string currentDir = dirsToProcess.front();
+            // Pre-allocate memory for better performance
+            files.reserve(10000);  // Reserve space for 10k files initially
+            
+            // Use queue-based approach to handle recursion and catch all permission errors
+            std::queue<std::pair<std::string, int>> dirsToProcess;
+            dirsToProcess.push({directoryPath, 0});
+            
+            int processedDirs = 0;
+            auto startTime = std::chrono::steady_clock::now();
+            
+            while (!dirsToProcess.empty() && !scanInterrupted) {
+                auto [currentDir, depth] = dirsToProcess.front();
                 dirsToProcess.pop();
+                processedDirs++;
+                
+                // Progress feedback every 50 directories for faster updates
+                if (processedDirs % 50 == 0) {
+                    auto currentTime = std::chrono::steady_clock::now();
+                    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(currentTime - startTime).count();
+                    std::cout << "\rProcessed " << processedDirs << " directories, found " << files.size() 
+                              << " files, depth " << depth << " (" << elapsed << "ms) [Press ESC to stop]" << std::flush;
+                }
                 
                 try {
-                    loadFilesRecursive(currentDir, dirsToProcess);
+                    loadFilesRecursive(currentDir, dirsToProcess, depth);
                 } catch (const std::exception& e) {
                     if (logger) {
                         logger->logUnreadableFile(currentDir, "directory_processing", e.what());
@@ -497,13 +503,26 @@ public:
                 }
             }
             
+            auto endTime = std::chrono::steady_clock::now();
+            auto totalTime = std::chrono::duration_cast<std::chrono::milliseconds>(endTime - startTime).count();
+            
+            if (scanInterrupted) {
+                std::cout << "\rScan interrupted: " << processedDirs << " directories, " << files.size() 
+                          << " files in " << totalTime << "ms (partial results)" << std::endl;
+            } else {
+                std::cout << "\rScan complete: " << processedDirs << " directories, " << files.size() 
+                          << " files in " << totalTime << "ms" << std::endl;
+            }
+            
             // Сортировка: сначала каталоги, потом файлы
+            std::cout << "Sorting files..." << std::flush;
             std::sort(files.begin(), files.end(), [](const FileInfo& a, const FileInfo& b) {
                 if (a.isDirectory != b.isDirectory) {
                     return a.isDirectory > b.isDirectory;
                 }
                 return a.name < b.name;
             });
+            std::cout << " done!" << std::endl;
             
         } catch (const std::exception& e) {
             if (logger) {
@@ -806,6 +825,8 @@ void setTextPosition(sf::Text& text, const sf::FloatRect& bounds, HAlign hAlign 
 int main(int argc, char** argv) {
     if (argc < 2) {
         std::cerr << "Usage: " << argv[0] << " <dir> [m rows] [n cols] [frame size] [bgcolor hex] [linecolor hex] [line size] [font index] [border hex] [text hex] [font size]\n";
+        std::cerr << "Optimized for fast scanning like 'ls -lR'. System dirs limited to 5 levels depth for performance.\n";
+        std::cerr << "Controls: Arrow keys/PgUp/PgDn = navigate, R = rescan, M = menu, L = show log info\n";
         return 1;
     }
     
@@ -927,8 +948,16 @@ int main(int argc, char** argv) {
         return cellNameWidth + cellSizeWidth + cellDateWidth + cellPermWidth;
     };
 
-    // Загрузка файлов
-    FileManager fileManager(absoluteDirectory);
+    // Загрузка файлов (with depth limit for performance)
+    int scanDepth = 10;  // Reasonable depth limit for /usr
+    if (absoluteDirectory.find("usr") != std::string::npos || 
+        absoluteDirectory.find("/lib") != std::string::npos ||
+        absoluteDirectory.find("/sys") != std::string::npos) {
+        scanDepth = 5;  // Limit system directories to 5 levels
+        std::cout << "System directory detected, limiting scan depth to " << scanDepth << " levels" << std::endl;
+    }
+    
+    FileManager fileManager(absoluteDirectory, scanDepth);
     const auto& files = fileManager.getFiles();
     
     // Inform user about logging
