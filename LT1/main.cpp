@@ -214,7 +214,7 @@ std::string formatSizeInfo(std::uintmax_t actualSize, std::uintmax_t allocatedSi
     // Pre-allocate string to avoid reallocation
     std::string result;
     result.reserve(16);  // Reserve space for typical size strings
-    return std::to_string(allocatedSize);
+    return std::to_string(actualSize) + "/" + std::to_string(allocatedSize);
 }
 
 // REMOVED: Recursive directory size calculation - too slow for large directories
