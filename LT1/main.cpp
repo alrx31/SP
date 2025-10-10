@@ -112,6 +112,33 @@ public:
         logUnreadableFile(filePath, operation, ec.message());
     }
 
+    void logFileModification(const std::string& filePath, const std::string& operation, const std::string& details = "") {
+        auto now = std::chrono::system_clock::now();
+        auto time_t = std::chrono::system_clock::to_time_t(now);
+        
+        std::ostringstream logMessage;
+        logMessage << "[" << std::put_time(std::localtime(&time_t), "%H:%M:%S") << "] "
+                   << "MODIFIED " << operation << ": " << filePath;
+        
+        if (!details.empty()) {
+            logMessage << " - " << details;
+        }
+        
+        // Try to write to log file if available
+        if (loggingEnabled && logFile.is_open()) {
+            try {
+                logFile << logMessage.str() << std::endl;
+                logFile.flush();
+            } catch (const std::exception& e) {
+                // If file logging fails, output to console
+                std::cout << "[LOG] " << logMessage.str() << std::endl;
+            }
+        } else {
+            // If no log file available, output to console
+            std::cout << "[LOG] " << logMessage.str() << std::endl;
+        }
+    }
+
     std::string getLogFilePath() const {
         return logFilePath;
     }
@@ -145,6 +172,25 @@ struct FileInfo {
     bool isDirectory;
     std::uintmax_t actualSize;    // размер данных
     std::uintmax_t allocatedSize; // фактически занимаемое место
+};
+
+// Structure to track cell editing state
+struct CellEditState {
+    bool isEditing = false;
+    int row = -1;
+    int column = -1;
+    std::string originalValue;
+    std::string currentValue;
+    sf::RectangleShape cursor;
+    sf::Clock cursorBlink;
+    
+    void reset() {
+        isEditing = false;
+        row = -1;
+        column = -1;
+        originalValue.clear();
+        currentValue.clear();
+    }
 };
 
 // Helper function to get filesystem block size
@@ -347,6 +393,144 @@ public:
             logger = nullptr;
         }
         loadFiles();
+    }
+    
+    // Method to reload a single file's information
+    bool reloadSingleFile(const std::string& filePath) {
+        // Find the file in the files vector
+        auto it = std::find_if(files.begin(), files.end(), 
+            [&filePath](const FileInfo& info) { return info.name == filePath; });
+        
+        if (it == files.end()) {
+            if (logger) {
+                logger->logUnreadableFile(filePath, "reload_single_file", "File not found in list");
+            }
+            return false;
+        }
+        
+        // Reload file information
+        struct stat statBuf;
+        if (lstat(filePath.c_str(), &statBuf) == -1) {
+            if (logger) {
+                logger->logUnreadableFile(filePath, "reload_single_file_lstat", std::string("lstat failed: ") + strerror(errno));
+            }
+            return false;
+        }
+        
+        // Get filesystem block size
+        std::uintmax_t blockSize = getFilesystemBlockSize(fs::path(filePath).parent_path().string());
+        
+        // Update file info
+        it->isDirectory = S_ISDIR(statBuf.st_mode);
+        it->actualSize = statBuf.st_size;
+        
+        if (it->isDirectory) {
+            it->allocatedSize = calculateAllocatedSize(statBuf.st_size, blockSize);
+            it->size = formatSizeInfo(it->actualSize, it->allocatedSize);
+        } else {
+            it->allocatedSize = calculateAllocatedSize(statBuf.st_size, blockSize);
+            it->size = formatSizeInfo(it->actualSize, it->allocatedSize);
+        }
+        
+        it->date = formatDate(statBuf.st_mtime, logger.get(), filePath);
+        it->permissions = getFilePermissionsFromStat(statBuf);
+        
+        if (logger) {
+            logger->logFileModification(filePath, "file_info_reloaded", "Successfully updated file information");
+        }
+        
+        return true;
+    }
+    
+    // Method to update file metadata (name, permissions, etc.)
+    bool updateFileMetadata(const std::string& filePath, int columnIndex, const std::string& newValue) {
+        try {
+            switch (columnIndex) {
+                case 0: // Name - rename file
+                {
+                    fs::path oldPath(filePath);
+                    fs::path newPath = oldPath.parent_path() / newValue;
+                    
+                    if (fs::exists(newPath)) {
+                        if (logger) {
+                            logger->logUnreadableFile(filePath, "rename", "Target file already exists: " + newPath.string());
+                        }
+                        return false;
+                    }
+                    
+                    fs::rename(oldPath, newPath);
+                    
+                    // Update in files vector
+                    auto it = std::find_if(files.begin(), files.end(), 
+                        [&filePath](const FileInfo& info) { return info.name == filePath; });
+                    if (it != files.end()) {
+                        it->name = newPath.string();
+                    }
+                    
+                    if (logger) {
+                        logger->logFileModification(filePath, "rename", "Renamed to: " + newPath.string());
+                    }
+                    
+                    return reloadSingleFile(newPath.string());
+                }
+                
+                case 3: // Permissions
+                {
+                    // Parse permissions string (e.g., "drwxr-xr-x")
+                    if (newValue.length() != 10) {
+                        if (logger) {
+                            logger->logUnreadableFile(filePath, "chmod", "Invalid permissions format: " + newValue);
+                        }
+                        return false;
+                    }
+                    
+                    mode_t mode = 0;
+                    
+                    // Owner permissions
+                    if (newValue[1] == 'r') mode |= S_IRUSR;
+                    if (newValue[2] == 'w') mode |= S_IWUSR;
+                    if (newValue[3] == 'x') mode |= S_IXUSR;
+                    
+                    // Group permissions
+                    if (newValue[4] == 'r') mode |= S_IRGRP;
+                    if (newValue[5] == 'w') mode |= S_IWGRP;
+                    if (newValue[6] == 'x') mode |= S_IXGRP;
+                    
+                    // Others permissions
+                    if (newValue[7] == 'r') mode |= S_IROTH;
+                    if (newValue[8] == 'w') mode |= S_IWOTH;
+                    if (newValue[9] == 'x' || newValue[9] == 't') mode |= S_IXOTH;
+                    
+                    // Sticky bit
+                    if (newValue[9] == 't' || newValue[9] == 'T') mode |= S_ISVTX;
+                    
+                    if (chmod(filePath.c_str(), mode) == -1) {
+                        if (logger) {
+                            logger->logUnreadableFile(filePath, "chmod", std::string("chmod failed: ") + strerror(errno));
+                        }
+                        return false;
+                    }
+                    
+                    if (logger) {
+                        logger->logFileModification(filePath, "chmod", "Changed permissions to: " + newValue);
+                    }
+                    
+                    return reloadSingleFile(filePath);
+                }
+                
+                default:
+                    if (logger) {
+                        logger->logUnreadableFile(filePath, "update_metadata", 
+                            "Cannot modify column " + std::to_string(columnIndex) + " (read-only)");
+                    }
+                    return false;
+            }
+        } catch (const std::exception& e) {
+            if (logger) {
+                logger->logUnreadableFile(filePath, "update_metadata", e.what());
+            }
+            return false;
+        }
     }
     
     void interruptScan() { scanInterrupted = true; }
@@ -1146,6 +1330,9 @@ int main(int argc, char** argv) {
     // Initial setup
     refreshAll();
 
+    // Cell editing state
+    CellEditState editState;
+
     while (window.isOpen()) {
         while (auto eventOpt = window.pollEvent()) {
             if (!eventOpt) break;
@@ -1155,8 +1342,59 @@ int main(int argc, char** argv) {
                 window.close();
             }
             
+            // Handle text input during editing
+            if (editState.isEditing && event.is<sf::Event::TextEntered>()) {
+                if (const auto* textEntered = event.getIf<sf::Event::TextEntered>()) {
+                    if (textEntered->unicode < 128) {
+                        char c = static_cast<char>(textEntered->unicode);
+                        
+                        // Handle backspace
+                        if (c == '\b') {
+                            if (!editState.currentValue.empty()) {
+                                editState.currentValue.pop_back();
+                            }
+                        }
+                        // Handle enter - save changes
+                        else if (c == '\r' || c == '\n') {
+                            // Apply changes
+                            int fileIndex = currentPage * itemsPerPage + editState.row;
+                            if (fileIndex < (int)files.size() && editState.currentValue != editState.originalValue) {
+                                const FileInfo& fileInfo = files[fileIndex];
+                                
+                                // Only allow editing name (column 0) and permissions (column 3)
+                                if (editState.column == 0 || editState.column == 3) {
+                                    if (fileManagerPtr->updateFileMetadata(fileInfo.name, editState.column, editState.currentValue)) {
+                                        std::cout << "Successfully updated " << fileInfo.name << std::endl;
+                                        // Refresh the files list
+                                        files = fileManagerPtr->getFiles();
+                                        updateCells(currentPage);
+                                    } else {
+                                        std::cout << "Failed to update " << fileInfo.name << std::endl;
+                                    }
+                                }
+                            }
+                            editState.reset();
+                        }
+                        // Handle escape - cancel editing
+                        else if (c == 27) {
+                            editState.reset();
+                        }
+                        // Add printable characters
+                        else if (c >= 32 && c < 127) {
+                            editState.currentValue += c;
+                        }
+                    }
+                }
+            }
+            
             if (event.is<sf::Event::KeyPressed>()) {
                 if(const auto* keyPressed = event.getIf<sf::Event::KeyPressed>()){
+                    // Handle escape during editing
+                    if (editState.isEditing && keyPressed->scancode == sf::Keyboard::Scancode::Escape) {
+                        editState.reset();
+                        continue;
+                    }
+                    
                     // Handle menu first if it's open
                     if (configMenu.getVisible()) {
                         configMenu.handleInput(keyPressed->scancode);
@@ -1166,6 +1404,11 @@ int main(int argc, char** argv) {
                             refreshAll();
                         }
                         continue; // Don't process other keys while menu is open
+                    }
+                    
+                    // Don't process other keys during editing
+                    if (editState.isEditing) {
+                        continue;
                     }
                     
                     // Toggle menu with M key
@@ -1205,11 +1448,73 @@ int main(int argc, char** argv) {
                 }   
             }
 
+            // Handle mouse clicks for cell editing
+            if (event.is<sf::Event::MouseButtonPressed>() && !configMenu.getVisible() && !editState.isEditing) {
+                if (const auto* mouseButtonPressed = event.getIf<sf::Event::MouseButtonPressed>()) {
+                    if (mouseButtonPressed->button == sf::Mouse::Button::Left) {
+                        sf::Vector2i mousePos = sf::Mouse::getPosition(window);
+                        
+                        // Check if click is within table bounds
+                        if (mousePos.x >= config.frameSize && mousePos.x <= width - config.frameSize &&
+                            mousePos.y >= config.frameSize + cellHeight && mousePos.y <= height - config.frameSize - 40) {
+                            
+                            // Calculate which cell was clicked
+                            float relativeY = mousePos.y - config.frameSize - cellHeight;
+                            int row = static_cast<int>(relativeY / cellHeight);
+                            
+                            // Determine column based on x position
+                            int column = -1;
+                            float relativeX = mousePos.x - config.frameSize;
+                            
+                            if (relativeX < cellNameWidth) {
+                                column = 0;
+                            } else if (relativeX < cellNameWidth + cellSizeWidth) {
+                                column = 1;
+                            } else if (relativeX < cellNameWidth + cellSizeWidth + cellDateWidth) {
+                                column = 2;
+                            } else if (relativeX < cellNameWidth + cellSizeWidth + cellDateWidth + cellPermWidth) {
+                                column = 3;
+                            }
+                            
+                            if (row >= 0 && row < config.m - 1 && column >= 0) {
+                                int fileIndex = currentPage * itemsPerPage + row;
+                                
+                                if (fileIndex < (int)files.size()) {
+                                    const FileInfo& fileInfo = files[fileIndex];
+                                    
+                                    // Only allow editing name (column 0) and permissions (column 3)
+                                    if (column == 0 || column == 3) {
+                                        editState.isEditing = true;
+                                        editState.row = row;
+                                        editState.column = column;
+                                        
+                                        // Get original value
+                                        if (column == 0) {
+                                            editState.originalValue = fs::path(fileInfo.name).filename().string();
+                                        } else if (column == 3) {
+                                            editState.originalValue = fileInfo.permissions;
+                                        }
+                                        
+                                        editState.currentValue = editState.originalValue;
+                                        
+                                        std::cout << "Editing cell [" << row << ", " << column << "]: " 
+                                                  << editState.originalValue << std::endl;
+                                        std::cout << "Press Enter to save, Escape to cancel" << std::endl;
+                                    } else {
+                                        std::cout << "Column " << column << " is read-only (only Name and Permissions can be edited)" << std::endl;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             if (event.is<sf::Event::MouseWheelScrolled>()) {
                 if (const auto* mouseWheelScrolled = event.getIf<sf::Event::MouseWheelScrolled>())
                 {
-                    // Don't handle mouse wheel if menu is open
-                    if (configMenu.getVisible()) continue;
+                    // Don't handle mouse wheel if menu is open or editing
+                    if (configMenu.getVisible() || editState.isEditing) continue;
                     
                     if (mouseWheelScrolled->wheel == sf::Mouse::Wheel::Vertical) {
                         if (mouseWheelScrolled->delta > 0) {
@@ -1278,6 +1583,56 @@ int main(int argc, char** argv) {
         
         for (auto& t : cells) {
             window.draw(t);
+        }
+        
+        // Draw editing overlay if editing
+        if (editState.isEditing && editState.row >= 0 && editState.column >= 0) {
+            // Calculate cell bounds
+            float cellWidtht = 0;
+            switch (editState.column) {
+                case 0: cellWidtht = cellNameWidth; break;
+                case 1: cellWidtht = cellSizeWidth; break;
+                case 2: cellWidtht = cellDateWidth; break;
+                case 3: cellWidtht = cellPermWidth; break;
+            }
+            
+            float cellX = config.frameSize + calcCellWidthByNumber(editState.column - 1);
+            float cellY = config.frameSize + (editState.row + 1) * cellHeight;
+            
+            // Draw highlight background
+            sf::RectangleShape editHighlight(sf::Vector2f(cellWidtht, cellHeight));
+            editHighlight.setPosition(sf::Vector2f(cellX, cellY));
+            editHighlight.setFillColor(sf::Color(100, 100, 200, 128));
+            editHighlight.setOutlineColor(sf::Color::Yellow);
+            editHighlight.setOutlineThickness(2);
+            window.draw(editHighlight);
+            
+            // Draw edited text
+            unsigned int charSize = static_cast<unsigned int>(16 * config.fontSize);
+            sf::Text editText(font, editState.currentValue, charSize);
+            editText.setFillColor(sf::Color::White);
+            
+            sf::FloatRect cellBounds(
+                sf::Vector2f(cellX, cellY),
+                sf::Vector2f(cellWidtht, cellHeight)
+            );
+            setTextPosition(editText, cellBounds, HAlign::Left, VAlign::Center);
+            window.draw(editText);
+            
+            // Draw blinking cursor
+            if (editState.cursorBlink.getElapsedTime().asMilliseconds() % 1000 < 500) {
+                auto textBounds = editText.getGlobalBounds();
+                sf::RectangleShape cursor(sf::Vector2f(2, cellHeight - 10));
+                cursor.setPosition(sf::Vector2f(textBounds.position.x + textBounds.size.x + 2, cellY + 5));
+                cursor.setFillColor(sf::Color::White);
+                window.draw(cursor);
+            }
+            
+            // Draw instruction text at bottom
+            sf::Text instructions(font, "Editing: Enter to save, Escape to cancel", static_cast<unsigned int>(14 * config.fontSize));
+            instructions.setFillColor(sf::Color::Yellow);
+            instructions.setPosition(sf::Vector2f(config.frameSize + 10, height - 60));
+            window.draw(instructions);
         }
         
         // Рисуем информацию о странице

@@ -1,0 +1,25 @@
+
+=== Session started: 2025-10-10 12:13:31 ===
+[12:14:01] MODIFIED rename: /home/alrx/PROGRAM/SP/LT1/readme.md - Renamed to: /home/alrx/PROGRAM/SP/LT1/readme1.md
+[12:14:01] MODIFIED file_info_reloaded: /home/alrx/PROGRAM/SP/LT1/readme1.md - Successfully updated file information
+[12:14:30] FAILED chmod: /home/alrx/PROGRAM/SP/LT1/readme1.md - Error: Invalid permissions format: rwxrwxrwx
+=== Session ended: 2025-10-10 12:14:44 ===
+
+
+=== Session started: 2025-10-10 12:16:06 ===
+[12:16:14] MODIFIED chmod: /home/alrx/PROGRAM/SP/LT1/readme.md - Changed permissions to: -rw-r--rwe
+[12:16:14] MODIFIED file_info_reloaded: /home/alrx/PROGRAM/SP/LT1/readme.md - Successfully updated file information
+[12:16:18] MODIFIED chmod: /home/alrx/PROGRAM/SP/LT1/readme.md - Changed permissions to: -rw-r--rwx
+[12:16:18] MODIFIED file_info_reloaded: /home/alrx/PROGRAM/SP/LT1/readme.md - Successfully updated file information
+[12:16:31] MODIFIED chmod: /home/alrx/PROGRAM/SP/LT1/readme.md - Changed permissions to: -rwxrwxrwx
+[12:16:31] MODIFIED file_info_reloaded: /home/alrx/PROGRAM/SP/LT1/readme.md - Successfully updated file information
+[12:16:50] MODIFIED chmod: /home/alrx/PROGRAM/SP/LT1/readme.md - Changed permissions to: drwxrwxrwx
+[12:16:50] MODIFIED file_info_reloaded: /home/alrx/PROGRAM/SP/LT1/readme.md - Successfully updated file information
+[12:17:11] MODIFIED chmod: /home/alrx/PROGRAM/SP/LT1/readme.md - Changed permissions to: -r--r--r--
+[12:17:11] MODIFIED file_info_reloaded: /home/alrx/PROGRAM/SP/LT1/readme.md - Successfully updated file information
+[12:17:21] MODIFIED chmod: /home/alrx/PROGRAM/SP/LT1/readme.md - Changed permissions to: -rwxrwxrwx
+[12:17:21] MODIFIED file_info_reloaded: /home/alrx/PROGRAM/SP/LT1/readme.md - Successfully updated file information
+
+=== Session started: 2025-10-10 12:17:33 ===
+[12:17:43] FAILED subdirectory_access_test: /usr/share/factory/etc/audit/plugins.d - Error: access denied: Permission denied
+[12:18:51] FAILED chmod: /usr/include/absl/strings/internal/str_join_internal.h - Error: chmod failed: Operation not permitted
